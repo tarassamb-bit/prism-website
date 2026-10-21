@@ -67,6 +67,21 @@
     .notes strong { color: var(--text); font-weight: 500; }
     code { font: 400 12px "JetBrains Mono", monospace; background: var(--surface2); padding: 1px 5px; border-radius: 4px; color: var(--text); }
     footer { color: var(--text2); font-size: 12px; border-top: 1px solid var(--border); }
+    #account { margin-top: 40px; }
+    #account h2 { font: 500 26px "Space Grotesk", sans-serif; margin: 0 0 6px; }
+    #account form { display: grid; gap: 10px; max-width: 360px; margin-top: 14px; }
+    input { font: inherit; color: var(--text); background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+    input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    button.button { border: 0; cursor: pointer; font: inherit; font-weight: 500; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 16px 0; }
+    .stat { background: var(--surface1); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+    .stat b { display: block; font: 500 30px "Space Grotesk", sans-serif; }
+    .stat span, #status { color: var(--text2); font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+    th { color: var(--text2); font-weight: 400; }
+    td.num { font-family: "JetBrains Mono", monospace; }
   </style>
 </head>
 <body>
@@ -108,8 +123,76 @@
       <p><strong>Windows:</strong> run the installer; ffmpeg is included. If SmartScreen warns, choose More info → Run anyway. <strong>Linux:</strong> the AppImage includes ffmpeg; allow it to run as a program, then double-click.</p>
       <p><strong>Check your download</strong> against <a href="https://github.com/tarassamb-bit/Prism/releases/latest/download/SHA256SUMS.txt">SHA256SUMS.txt</a>.</p>
     </div>
+    <section id="account" aria-live="polite">
+      <h2>Your stats</h2>
+      <p class="req">Sign in with the same account you use in Prism for Mac (Settings → Account). Each export there adds a row here.</p>
+      <form id="auth">
+        <input type="email" name="email" placeholder="Email" autocomplete="username" required>
+        <input type="password" name="password" placeholder="Password (at least 6 characters)" autocomplete="current-password" minlength="6" required>
+        <div class="row">
+          <button class="button" type="submit" value="in">Sign in</button>
+          <button class="button secondary" type="submit" value="up">Create account</button>
+        </div>
+      </form>
+      <div id="signedIn" hidden>
+        <div class="row"><span id="who"></span><button class="button secondary" id="signOut" type="button">Sign out</button></div>
+        <div class="stats">
+          <div class="stat"><b id="exports">0</b><span>exports</span></div>
+          <div class="stat"><b id="shorts">0</b><span>Shorts made</span></div>
+          <div class="stat"><b id="minutes">0</b><span>minutes of Shorts</span></div>
+        </div>
+        <table><thead><tr><th>Date</th><th>Shorts</th><th>Length</th><th>Quality</th></tr></thead><tbody id="rows"></tbody></table>
+      </div>
+      <p id="status"></p>
+    </section>
   </main>
 
   <footer>Prism · MIT license · fonts under the SIL Open Font License</footer>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <script>
+    // The publishable key is meant for browsers; Row Level Security limits every user to their own rows.
+    const db = supabase.createClient('https://isdplhahgggundbohmlr.supabase.co', 'sb_publishable_ATTcp2-mrca0swMStHHdYQ_Le851b8l');
+    const $ = (id) => document.getElementById(id);
+    const say = (text) => { $('status').textContent = text; };
+
+    $('auth').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      const credentials = { email: form.get('email'), password: form.get('password') };
+      say('Working…');
+      const { data, error } = event.submitter.value === 'up'
+        ? await db.auth.signUp({ ...credentials, options: { emailRedirectTo: location.origin + location.pathname } })
+        : await db.auth.signInWithPassword(credentials);
+      if (error) return say(error.message);
+      if (!data.session) say('Check your inbox to confirm your email, then sign in.');
+    });
+    $('signOut').addEventListener('click', () => db.auth.signOut());
+
+    async function show(session) {
+      $('auth').hidden = !!session;
+      $('signedIn').hidden = !session;
+      if (!session) return;
+      say('');
+      $('who').textContent = 'Signed in as ' + session.user.email;
+      const { data, error } = await db.from('exports').select('created_at, short_count, seconds, quality').order('created_at', { ascending: false });
+      if (error) return say('Could not load your stats: ' + error.message);
+      $('exports').textContent = data.length;
+      $('shorts').textContent = data.reduce((sum, row) => sum + row.short_count, 0);
+      $('minutes').textContent = Math.round(data.reduce((sum, row) => sum + row.seconds, 0) / 60);
+      $('rows').replaceChildren(...data.slice(0, 50).map((row) => {
+        const tr = document.createElement('tr');
+        for (const [text, mono] of [[new Date(row.created_at).toLocaleString(), false], [row.short_count, true],
+                                    [Math.round(row.seconds) + ' s', true], [row.quality, false]]) {
+          const td = document.createElement('td');
+          td.textContent = text;
+          if (mono) td.className = 'num';
+          tr.append(td);
+        }
+        return tr;
+      }));
+      if (!data.length) say('No exports yet. Sign in to Prism for Mac and export a Short.');
+    }
+    db.auth.onAuthStateChange((_event, session) => { setTimeout(() => show(session)); });
+  </script>
 </body>
 </html>
