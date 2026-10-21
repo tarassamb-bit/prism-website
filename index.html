@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prism · Download</title>
+  <meta name="description" content="Download Prism for macOS, Windows and Linux. One long video in, many vertical Shorts out.">
+  <link rel="icon" href="icon.png">
+  <style>
+    @font-face { font-family: "Space Grotesk"; src: url(fonts/SpaceGrotesk-Medium.ttf); font-weight: 500; }
+    @font-face { font-family: Sora; src: url(fonts/Sora-Regular.ttf); font-weight: 400; }
+    @font-face { font-family: Sora; src: url(fonts/Sora-Medium.ttf); font-weight: 500; }
+    @font-face { font-family: "JetBrains Mono"; src: url(fonts/JetBrainsMono-Regular.ttf); }
+
+    /* Prism design system tokens (macOS/Sources/RelioApp/Theme.swift). Dark is the primary theme. */
+    :root {
+      --surface0: #0E0F14; --surface1: #171920; --surface2: #20232B; --border: #2C2F37;
+      --text: #F6F3EC; --text2: #8A8F98; --action: #3FA9F5; --accent: #3FA9F5;
+      --coral: #FF6B57; --amber: #FFC233; --ink: #0E0F14;
+      color-scheme: dark;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --surface0: #F6F3EC; --surface1: #FFFFFF; --surface2: #EDE9E0; --border: #E2DED4;
+        --text: #0E0F14; --text2: #5C6068; --accent: #0B6CB5; --amber: #8F5E00;
+        color-scheme: light;
+      }
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+      background: var(--surface0); color: var(--text); font: 400 15px/1.55 Sora, system-ui, sans-serif;
+    }
+    a { color: var(--accent); }
+    header, footer { max-width: 1040px; width: 100%; margin: 0 auto; padding: 22px 16px; display: flex; align-items: center; gap: 10px; }
+    header img { width: 28px; height: 28px; }
+    .wordmark { font: 500 20px "Space Grotesk", sans-serif; letter-spacing: -0.01em; }
+    .pill { margin-left: auto; font: 400 12px "JetBrains Mono", monospace; color: var(--text2);
+      border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; }
+
+    main { flex: 1; max-width: 1040px; width: 100%; margin: 0 auto; padding: 40px 16px 24px; }
+    .spectrum { height: 3px; width: 72px; border-radius: 2px; margin-bottom: 22px;
+      background: linear-gradient(90deg, var(--coral), var(--amber), var(--action)); }
+    h1 { font: 500 clamp(36px, 6vw, 60px)/1.05 "Space Grotesk", sans-serif; letter-spacing: -0.02em; margin: 0 0 16px; max-width: 14ch; }
+    .lede { color: var(--text2); font-size: 17px; max-width: 56ch; margin: 0 0 40px; }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+    .card { background: var(--surface1); border: 1px solid var(--border); border-radius: 16px; padding: 22px;
+      display: flex; flex-direction: column; gap: 6px; }
+    .card.recommended { border-color: var(--action); }
+    .card h2 { font: 500 22px "Space Grotesk", sans-serif; margin: 0; display: flex; align-items: center; gap: 10px; }
+    .tag { font: 400 11px "JetBrains Mono", monospace; text-transform: uppercase; letter-spacing: .04em;
+      padding: 3px 8px; border-radius: 6px; background: var(--surface2); color: var(--text2); }
+    .recommended .tag { color: var(--accent); }
+    .untested .tag { color: var(--amber); }
+    .req { color: var(--text2); font-size: 13px; margin: 0 0 14px; }
+    .meta { font: 400 12px "JetBrains Mono", monospace; color: var(--text2); }
+    .button { margin-top: auto; display: inline-flex; justify-content: center; align-items: center; gap: 8px;
+      background: var(--action); color: var(--ink); text-decoration: none; font-weight: 500;
+      border-radius: 10px; padding: 11px 16px; }
+    .button:hover { filter: brightness(1.08); }
+    .button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+
+    .notes { margin-top: 36px; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; color: var(--text2); font-size: 13px; }
+    .notes strong { color: var(--text); font-weight: 500; }
+    code { font: 400 12px "JetBrains Mono", monospace; background: var(--surface2); padding: 1px 5px; border-radius: 4px; color: var(--text); }
+    footer { color: var(--text2); font-size: 12px; border-top: 1px solid var(--border); }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="icon.png" alt="">
+    <span class="wordmark">Prism</span>
+    <span class="pill">0.2.0-beta.1 · test build</span>
+  </header>
+
+  <main>
+    <div class="spectrum" aria-hidden="true"></div>
+    <h1>One long video in. Many Shorts out.</h1>
+    <p class="lede">Prism finds the strongest moments in a podcast, lecture or stream, cuts them on whole sentences, frames the speaker and adds captions. Every Short is a 1080 × 1920 MP4 you review before export.</p>
+
+    <div class="grid">
+      <section class="card recommended" id="macos">
+        <h2>macOS <span class="tag">Recommended</span></h2>
+        <p class="req">macOS 14 or newer, Apple Silicon</p>
+        <span class="meta">Prism-macOS-arm64.zip · 1.9 MB</span>
+        <a class="button" href="downloads/Prism-macOS-arm64.zip" download>Download for Mac</a>
+      </section>
+      <section class="card untested" id="windows">
+        <h2>Windows <span class="tag">Untested</span></h2>
+        <p class="req">Windows 10 or 11, 64-bit. Needs ffmpeg.</p>
+        <span class="meta">Prism-Windows-x64.zip · 29 MB</span>
+        <a class="button" href="downloads/Prism-Windows-x64.zip" download>Download for Windows</a>
+      </section>
+      <section class="card untested" id="linux">
+        <h2>Linux <span class="tag">Untested</span></h2>
+        <p class="req">x64 with GTK 4. Needs ffmpeg.</p>
+        <span class="meta">Prism-Linux-x64.tar.gz · 7.8 MB</span>
+        <a class="button" href="downloads/Prism-Linux-x64.tar.gz" download>Download for Linux</a>
+      </section>
+    </div>
+
+    <div class="notes">
+      <p><strong>You need a Gemini API key.</strong> Get one at <a href="https://aistudio.google.com/apikey">aistudio.google.com/apikey</a>. Google bills your account, and audio, transcripts and frames are sent to Google.</p>
+      <p><strong>macOS:</strong> this build is not notarized. The first time, right-click Prism.app and choose Open. If macOS still refuses, run <code>xattr -dr com.apple.quarantine /Applications/Prism.app</code>.</p>
+      <p><strong>Check your download</strong> against <a href="downloads/SHA256SUMS.txt">SHA256SUMS.txt</a>.</p>
+    </div>
+  </main>
+
+  <footer>Prism · MIT license · fonts under the SIL Open Font License</footer>
+</body>
+</html>

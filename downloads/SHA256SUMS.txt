@@ -1,0 +1,3 @@
+8ebcf9dd1814afabb7ae9f0c7dafb8bf39a56fe4e9b69b8b1264e4564e4fc2bc  Prism-Linux-x64.tar.gz
+53bf734db02231222e6782dcc934aa29e5f25af3fcd5e8183b953e72ee234d9b  Prism-Windows-x64.zip
+29bba3f0beed133e8c2d060c5e1eba602ee05e3fbb63f16ff6fdd6d75d95123a  Prism-macOS-arm64.zip
