@@ -85,26 +85,27 @@
       <section class="card recommended" id="macos">
         <h2>macOS <span class="tag">Recommended</span></h2>
         <p class="req">macOS 14 or newer, Apple Silicon</p>
-        <span class="meta">Prism-macOS-arm64.zip · 1.9 MB</span>
-        <a class="button" href="downloads/Prism-macOS-arm64.zip" download>Download for Mac</a>
+        <span class="meta">Prism-macOS.dmg · 2.5 MB</span>
+        <a class="button" href="downloads/Prism-macOS.dmg" download>Download for Mac</a>
       </section>
       <section class="card untested" id="windows">
         <h2>Windows <span class="tag">Untested</span></h2>
         <p class="req">Windows 10 or 11, 64-bit. Needs ffmpeg.</p>
-        <span class="meta">Prism-Windows-x64.zip · 29 MB</span>
-        <a class="button" href="downloads/Prism-Windows-x64.zip" download>Download for Windows</a>
+        <span class="meta">Prism-Windows-x64.exe · 72 MB</span>
+        <a class="button" href="downloads/Prism-Windows-x64.exe" download>Download for Windows</a>
       </section>
       <section class="card untested" id="linux">
         <h2>Linux <span class="tag">Untested</span></h2>
         <p class="req">x64 with GTK 4. Needs ffmpeg.</p>
-        <span class="meta">Prism-Linux-x64.tar.gz · 7.8 MB</span>
-        <a class="button" href="downloads/Prism-Linux-x64.tar.gz" download>Download for Linux</a>
+        <span class="meta">Prism-Linux-x64 · 47 MB</span>
+        <a class="button" href="downloads/Prism-Linux-x64" download>Download for Linux</a>
       </section>
     </div>
 
     <div class="notes">
       <p><strong>You need a Gemini API key.</strong> Get one at <a href="https://aistudio.google.com/apikey">aistudio.google.com/apikey</a>. Google bills your account, and audio, transcripts and frames are sent to Google.</p>
-      <p><strong>macOS:</strong> this build is not notarized. The first time, right-click Prism.app and choose Open. If macOS still refuses, run <code>xattr -dr com.apple.quarantine /Applications/Prism.app</code>.</p>
+      <p><strong>macOS:</strong> open the DMG and drag Prism to Applications. The build is not notarized, so the first time right-click Prism.app and choose Open. If macOS still refuses, run <code>xattr -dr com.apple.quarantine /Applications/Prism.app</code>.</p>
+      <p><strong>Windows:</strong> run Prism.exe; put ffmpeg.exe and ffprobe.exe next to it. <strong>Linux:</strong> run <code>chmod +x Prism-Linux-x64</code>, then open it. No .NET install needed on either.</p>
       <p><strong>Check your download</strong> against <a href="downloads/SHA256SUMS.txt">SHA256SUMS.txt</a>.</p>
     </div>
   </main>
