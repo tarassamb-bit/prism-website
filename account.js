@@ -214,16 +214,28 @@
     const user = session?.user;
     const userId = user?.id || null;
     const page = document.body.dataset.authPage;
+    const changed = userId !== currentUserId;
+    if (changed) {
+      // Revoke old queries before redirects: navigation can be delayed or restored from the browser cache.
+      statsRequest += 1;
+      currentUserId = userId;
+      clearStats();
+      signedIn.hidden = true;
+      signedIn.setAttribute('aria-busy', 'false');
+      if (byId('who')) byId('who').textContent = '';
+    }
     if (userId && page === 'login') {
-      location.replace(nextPath() || `/dashboard_${userId}`);
+      location.replace(nextPath() || '/app/settings/overview');
       return;
     }
     if (!userId && page === 'dashboard') {
       location.replace('/login');
       return;
     }
-    if (userId && page === 'dashboard' && location.pathname !== `/dashboard_${userId}`) {
-      history.replaceState(null, '', `/dashboard_${userId}`);
+    // The dashboard moved into the app's Settings; old links and bookmarks end up there.
+    if (userId && page === 'dashboard') {
+      location.replace('/app/settings/overview');
+      return;
     }
     formWrap.hidden = Boolean(userId);
     signedIn.hidden = !userId;
@@ -232,14 +244,11 @@
       ? 'Track your exports, Shorts, and time created with Prism for Mac.'
       : signedOutDescription;
     document.querySelectorAll('.nav-signin').forEach((link) => { link.textContent = userId ? 'Your account' : 'Sign in'; });
-    if (userId === currentUserId) {
+    if (!changed) {
       if (!userId) account.dataset.state = 'signed-out';
       return;
     }
-    currentUserId = userId;
     if (!userId) {
-      statsRequest += 1;
-      clearStats();
       if (byId('who')) byId('who').textContent = '';
       signedIn.setAttribute('aria-busy', 'false');
       account.dataset.state = 'signed-out';
@@ -261,7 +270,7 @@
       const { data, error } = action === 'up'
         ? await db.auth.signUp({
           ...credentials,
-          options: { emailRedirectTo: window.location.origin + window.location.pathname },
+          options: { emailRedirectTo: new URL('/login', window.location.origin).href },
         })
         : await db.auth.signInWithPassword(credentials);
       if (error) throw error;
@@ -311,6 +320,7 @@
     if (authRevision === initialRevision) showSession(data?.session || null);
     if (!currentUserId) say('');
   }).catch((error) => {
+    if (authRevision !== initialRevision) return;
     say(`Couldn’t restore your session. ${error?.message || 'Please sign in again.'}`, 'error');
     account.dataset.state = 'signed-out';
   }).finally(() => {
