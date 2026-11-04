@@ -64,10 +64,15 @@ async function signIn(email, password) {
 async function signUp(email, password) {
   const { data, error } = await db().auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: new URL('app/', location.origin + '/').href } });
   if (error) return { message: error.message };
+  track('signup_completed');
   return { message: data.session ? null : 'Check your inbox to confirm your email, then sign in.' };
 }
 
 // MARK: Routes: every screen has its own address, so reload, Back and shared links all work
+
+/** A custom analytics event (see /analytics.js). Only counts and buckets go in `data`, never titles or anything a person wrote. */
+const track = (name, data) => window.prismTrack?.(name, data);
+const lengthBucket = (minutes) => minutes < 10 ? '<10 min' : minutes < 30 ? '10–30 min' : minutes < 60 ? '30–60 min' : '60+ min';
 
 const slug = (name) => name.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'untitled';
 /** Projects and folders are named by their title plus the start of their id, so two with the same name still have different addresses. */
@@ -558,6 +563,7 @@ function startCreate({ project = null, media = null, file = null } = {}) {
 }
 
 async function chooseVideo(file) {
+  track('video_selected');
   const c = state.create;
   c.error = '';
   c.busy = true;
@@ -1099,6 +1105,7 @@ async function makeShorts(media, options) {
   await refreshUsage();
   const left = Math.max(0, (state.usage?.allowance ?? 0) - (state.usage?.used ?? 0));
   if (check.charge > left) {
+    track('limit_reached');
     return showError('Not enough minutes', `This re-analysis needs ${Math.floor(check.charge)} min, but you have ${Math.floor(left)} min left. Ask for a promo code to get more, then enter it in Usage.`, 'limit');
   }
   confirmRerun(media, options, { key, minutes, check });
@@ -1116,6 +1123,7 @@ function confirmRerun(media, options, usage) {
     </div>`);
   $('#confirm-rerun').addEventListener('click', () => {
     closeDialog();
+    track('reanalysis_started', { length: lengthBucket(usage.minutes) });
     runShorts(media, options, usage.key, usage.minutes);
   });
 }
@@ -1143,6 +1151,7 @@ async function runShorts(media, options, key, minutes) {
       throw new GeminiError('usageLimit', 429, left === null ? null
         : `This video is ${Math.ceil(minutes)} min long, but you have ${Math.floor(left)} of your ${Math.floor(u.allowance)} beta minutes left. A video you already used doesn't count again. Ask for a promo code to get more, then enter it in Settings › Usage.`);
     }
+    track('analysis_started', { length: lengthBucket(minutes) });
     const results = await Shorts.analyze(source, configuration, {
       duration: options.duration, count: options.count, region: options.region, customStart: options.region === 'custom' ? options.customStart : null,
       customEnd: options.region === 'custom' ? options.customEnd : null, excluding: usedRanges, videoType: options.videoType, cachedTranscript: saved,
@@ -1169,6 +1178,8 @@ async function runShorts(media, options, key, minutes) {
     if (state.project?.id !== projectId) return;
     project.segments.push(...created);
     await persist();
+    track('analysis_finished', { length: lengthBucket(minutes) });
+    track('clips_generated', { clips: created.length });
     endTask(task);
     state.selectedId = created[0].id;
     renderEditor();
@@ -1191,7 +1202,7 @@ function reportGenerationError(error) {
   if (cause instanceof GeminiError) {
     if (cause.failure === 'noStrongClips' || cause.failure === 'noDistinctClips') return showError('No Shorts found', cause.message);
     if (cause.failure === 'signIn' || cause.status === 401 || cause.status === 403) return showError('Check your sign-in', cause.message);
-    if (cause.failure === 'usageLimit') return showError('You’ve reached your beta limit', cause.message, 'limit');
+    if (cause.failure === 'usageLimit') { track('limit_reached'); return showError('You’ve reached your beta limit', cause.message, 'limit'); }
     if (cause.failure === 'request' && [429, 500, 502, 503, 504, 546].includes(cause.status)) return showError('Prism AI is unavailable right now', cause.message, 'temporary');
   }
   if (error instanceof ShortMakerError) return showError('Couldn’t make Shorts', error.message);
@@ -1637,6 +1648,7 @@ async function exportShorts(ids, quality, folder = null) {
       })]).finally(() => clearInterval(watchdog));
       const base = await uniqueName(folder, safeName(label));
       await saveFile(folder, blob, `${base}.mp4`);
+      track('clip_exported', { quality });
       seconds.push(segment.duration);
       made++;
     }

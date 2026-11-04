@@ -274,6 +274,7 @@
         })
         : await db.auth.signInWithPassword(credentials);
       if (error) throw error;
+      if (action === 'up') window.prismTrack?.('signup_completed');
       passwordInput.value = '';
       if (data?.session) showSession(data.session);
       else say(action === 'up'
