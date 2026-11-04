@@ -1578,7 +1578,9 @@ function openExportDialog(onlyId = null) {
   const list = state.project.segments.map((s, i) => `
     <label class="check"><input type="checkbox" name="pick" value="${s.id}" ${!onlyId || s.id === onlyId ? 'checked' : ''}>
       ${esc(s.suggestedTitle || `Short ${i + 1}`)} <span class="muted small">${clock(s.duration)}</span></label>`).join('');
-  const qualities = Object.entries(EXPORT_QUALITIES).map(([k, q]) => `<option value="${k}">${q.title} — ${q.detail}</option>`).join('');
+  // shortcut: Safari reports HEVC encoding as hardware but runs it at ~4 frames/s (2.5 min per 20 s Short), so it isn't offered there; drop when Safari's HEVC gets fast.
+  const safari = /Safari\//.test(navigator.userAgent) && !/Chrome|Chromium|Edg|CriOS|FxiOS/.test(navigator.userAgent);
+  const qualities = Object.entries(EXPORT_QUALITIES).filter(([k]) => !(safari && k === 'compact')).map(([k, q]) => `<option value="${k}">${q.title} — ${q.detail}</option>`).join('');
   openDialog(`
     <form id="export-form" class="stack">
       <h2>Export Shorts</h2>
