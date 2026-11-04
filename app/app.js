@@ -1231,11 +1231,16 @@ function renderTask() {
   const task = state.task;
   host.hidden = !task;
   if (!task) return;
-  host.innerHTML = `<div class="card progress-card" role="status">
-      <strong>${esc(task.stage)}</strong>
-      <div class="bar"><div style="width:${Math.round((task.progress ?? 0) * 100)}%"></div></div>
+  // Export updates this every frame; rebuilding the card each time would swallow clicks on Cancel.
+  if (!host.querySelector('.progress-card')) {
+    host.innerHTML = `<div class="card progress-card" role="status">
+      <strong></strong>
+      <div class="bar"><div></div></div>
       <button class="button ghost" data-action="cancel">Cancel</button>
     </div>`;
+  }
+  host.querySelector('strong').textContent = task.stage;
+  host.querySelector('.bar > div').style.width = `${Math.round((task.progress ?? 0) * 100)}%`;
 }
 
 function openDialog(html) {
