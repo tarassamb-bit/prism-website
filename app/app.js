@@ -1586,7 +1586,7 @@ function openExportDialog(onlyId = null) {
       <h2>Export Shorts</h2>
       ${list}
       <label>Quality <select name="quality">${qualities}</select></label>
-      <p class="muted small">Each Short downloads as an MP4, with its title and description in a .txt file next to it.</p>
+      <p class="muted small">Each Short downloads as an MP4.</p>
       <p id="export-status" class="muted small" role="status"></p>
       <div class="row end">
         <button type="button" class="button ghost" data-action="close">Cancel</button>
@@ -1642,8 +1642,6 @@ async function exportShorts(ids, quality, folder = null) {
       })]).finally(() => clearInterval(watchdog));
       const base = await uniqueName(folder, safeName(label));
       await saveFile(folder, blob, `${base}.mp4`);
-      const notes = [segment.suggestedTitle?.trim(), segment.suggestedDescription?.trim()].filter(Boolean).join('\n\n');
-      if (notes) await saveFile(folder, new Blob([notes + '\n'], { type: 'text/plain' }), `${base}.txt`);
       seconds.push(segment.duration);
       made++;
     }
