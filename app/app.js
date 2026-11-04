@@ -1426,39 +1426,27 @@ function renderInspector() {
   if (!host) return;
   const segment = selected();
   if (!segment) { host.innerHTML = '<p class="muted small">Select a Short to edit it.</p>'; return; }
-  const media = state.project.media.find((m) => m.id === segment.mediaId);
-  const source = state.sources.get(segment.mediaId);
-  const maxStart = Math.max(0, (source?.duration ?? media?.duration ?? 0) - segment.duration);
   const styleOptions = CAPTION_STYLES.map((s) => `<option value="${s}" ${s === (segment.captionStyle ?? 'classic') ? 'selected' : ''}>${STYLE_TITLES[s]}</option>`).join('');
   host.innerHTML = `
     <div class="stack">
       <label>Title <input data-field="suggestedTitle" value="${esc(segment.suggestedTitle ?? '')}"></label>
-      <label>Description <textarea data-field="suggestedDescription" rows="3">${esc(segment.suggestedDescription ?? '')}</textarea></label>
-      <p class="muted small">${esc(segment.selectionReason ?? '')}</p>
       ${segment.captionNotice ? `<p class="notice small">${esc(segment.captionNotice)}</p>` : ''}
-      <fieldset class="stack"><legend>Timing</legend>
-        <label>Start (s) <input type="number" step="0.1" min="0" max="${maxStart}" data-field="start" value="${segment.start.toFixed(2)}"></label>
-        <label>Length (s) <input type="number" step="0.1" min="0.5" data-field="duration" value="${segment.duration.toFixed(2)}"></label>
-        <p class="muted small">${source ? `Source is ${clock(source.duration)} long.` : ''} Changing the timing re-tracks the framing.</p>
-      </fieldset>
       <fieldset class="stack"><legend>Captions</legend>
         <label>Style <select data-field="captionStyle">${styleOptions}</select></label>
         <canvas class="style-preview" id="inspector-style" aria-label="Caption style preview"></canvas>
-        <p class="muted small">${esc(STYLE_DETAILS[segment.captionStyle ?? 'classic'] ?? '')}</p>
         <label>Position <select data-field="captionPosition">${['top', 'middle', 'bottom'].map((p) => `<option value="${p}" ${p === (segment.captionPosition ?? 'bottom') ? 'selected' : ''}>${p[0].toUpperCase() + p.slice(1)}</option>`).join('')}</select></label>
         <label>Size <select data-field="captionSize">${['small', 'medium', 'large'].map((p) => `<option value="${p}" ${p === (segment.captionSize ?? 'medium') ? 'selected' : ''}>${p[0].toUpperCase() + p.slice(1)}</option>`).join('')}</select></label>
         <label class="check"><input type="checkbox" data-field="captionAnimated" ${segment.captionAnimated ? 'checked' : ''}> Pop in new captions</label>
-        <label>Caption lines <textarea data-field="captionTexts" rows="5">${esc((segment.captions ?? []).map((c) => c.text).join('\n'))}</textarea></label>
-        <p class="muted small">Edit the words, one line per caption. Timing stays the same.</p>
+        <label>Caption lines <textarea data-field="captionTexts" rows="4">${esc((segment.captions ?? []).map((c) => c.text).join('\n'))}</textarea></label>
         <button class="button ghost" data-action="regen-captions">Regenerate subtitles</button>
       </fieldset>
-      <fieldset class="stack"><legend>Picture</legend>
+      <details class="more"><summary>More</summary><div class="stack">
         <label class="check"><input type="checkbox" data-field="splitScreen" ${segment.splitScreen ? 'checked' : ''}> Split screen (two speakers)</label>
         <label class="check"><input type="checkbox" data-field="fitToFrame" ${segment.fitToFrame ? 'checked' : ''}> Show the whole frame</label>
         <label class="check"><input type="checkbox" data-field="isMuted" ${segment.isMuted ? 'checked' : ''}> Mute audio</label>
         <label>On-screen text <input data-field="caption" value="${esc(segment.caption ?? '')}"></label>
         <button class="button ghost" data-action="retrack">Re-track the subject</button>
-      </fieldset>
+      </div></details>
       <div class="row between">
         <button class="button ghost danger" data-action="remove">Remove Short</button>
         <button class="button ghost" data-action="export-one">Export this Short</button>
