@@ -150,6 +150,15 @@ assert.ok(layers.some((l) => l.highlighted === 1));
 assert.ok(layers.every((l) => l.start >= 0 && l.start + l.duration <= 5 + 1e-9));
 assert.equal(elements({ duration: 5, captions: [], caption: '' }).length, 0);
 assert.ok(Math.abs(estimatedWords(cue('aa bbbb', 0, 6)).reduce((s, w) => s + w.duration, 0) - 6) < 1e-9);
+// No gaps: two lines with a 2 s pause between them still touch; each page ends where the next starts.
+const paused = pages([cue('First line.', 0, 1), cue('Second line.', 3, 1)], [], 'viral');
+paused.slice(0, -1).forEach((p, i) => assert.equal(p.end, paused[i + 1].start, 'captions must not leave a blank gap'));
+// An edited line follows the words actually spoken in its time, not an even spread over its silence.
+const heard = [{ text: 'zero', start: 2, duration: 0.3 }, { text: 'point', start: 2.3, duration: 0.3 }, { text: 'one', start: 2.6, duration: 0.3 }];
+const edited = pages([cue('0.1 is guessing', 0, 4)], heard, 'minimal')[0].words;
+assert.deepEqual(edited.map((w) => w.start), [2, 2.3, 2.6], 'same word count: timings are taken one for one');
+const shorter = pages([cue('Guessing', 0, 4)], heard, 'minimal')[0];
+assert.ok(shorter.start >= 2 && shorter.words[0].start + shorter.words[0].duration <= 2.9 + 1e-9, 'the line sits on the speech, not on the silence before it');
 
 // Retry-After handling.
 assert.equal(retryDelay(new Response('', { headers: { 'Retry-After': '12' } }), ''), 12);
