@@ -1597,7 +1597,9 @@ function openExportDialog(onlyId = null) {
       try { folder = await window.showDirectoryPicker({ id: 'prism-export', mode: 'readwrite', startIn: 'downloads' }); }
       catch (error) { if (error.name === 'AbortError') return; }
     }
-    exportShorts(ids, form.elements.quality.value, folder);
+    const quality = form.elements.quality.value;
+    closeDialog();
+    exportShorts(ids, quality, folder);
   });
 }
 
