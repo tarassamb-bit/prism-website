@@ -24,6 +24,11 @@
   window.va('beforeSend', beforeSend);
   window.si('beforeSend', beforeSend);
 
-  /** A custom event. `data` holds only counts and buckets, never titles or anything a person wrote. */
-  window.prismTrack = (name, data) => { if (measured) window.va('event', { name, ...(data ? { data } : {}) }); };
+  /** A product event: logged to Supabase's analytics_events table (readable only by the server) and sent to Vercel, whose
+   *  Events tab needs the Pro plan. `data` holds only counts and buckets, never titles or anything a person wrote. */
+  window.prismTrack = (name, data) => {
+    if (!measured) return;
+    window.va('event', { name, ...(data ? { data } : {}) });
+    window.prismDb?.from('analytics_events').insert({ name, data: data ?? {} }).then(() => {}, () => {});
+  };
 })();

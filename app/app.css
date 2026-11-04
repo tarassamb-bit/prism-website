@@ -341,3 +341,13 @@ details.insp-section:not([open]) { gap: 0; }
 .evict-list li { display: flex; justify-content: space-between; gap: 12px; background: var(--surface2); border-radius: 10px; padding: 8px 12px; font-size: 13px; }
 
 .section-title { font-size: 16px; margin: 8px 0 -4px; }
+
+/* Beta cap on the sign-in card (/beta.js). */
+.beta-spots { margin: 0; }
+.beta-waitlist { display: grid; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.beta-waitlist h3 { margin: 0; font-size: 15px; }
+.beta-waitlist p { margin: 0; color: var(--text2); font-size: 13px; }
+.beta-waitlist form { display: grid; gap: 10px; }
+.beta-waitlist label { display: none; }
+
+.turnstile-slot:empty { display: none; }

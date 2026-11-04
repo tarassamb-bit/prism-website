@@ -118,6 +118,20 @@
     return;
   }
   available = true;
+  // The sign-up page shows the beta's free spots, and the waitlist once they're gone.
+  const beta = signInButton?.value === 'up' && window.prismBeta
+    ? window.prismBeta.attach(db, form, { note: 'beta-spots', field: 'form-field', button: 'button button-primary' })
+    : null;
+  // The desktop apps open the sign-up page with the email they were given.
+  const givenEmail = new URLSearchParams(location.search).get('email');
+  if (givenEmail && emailInput && !emailInput.value) emailInput.value = givenEmail.slice(0, 254);
+  // The "I'm human" check sits above the button on the sign-up page; sign-in doesn't need it.
+  let human = null;
+  if (signInButton?.value === 'up' && window.prismTurnstile) {
+    const slot = Object.assign(document.createElement('div'), { className: 'turnstile-slot' });
+    signInButton.before(slot);
+    human = window.prismTurnstile.mount(slot);
+  }
 
   // ?next=/pricing returns the user where they came from. Only same-site paths are allowed; parsing
   // the URL also catches tricks like "/\evil.com" that a simple prefix check lets through.
@@ -207,6 +221,8 @@
       return 'Too many sign-up emails were sent in the last hour. Please try again a bit later.';
     }
     if (error?.status === 429) return 'Too many attempts. Wait a minute, then try again.';
+    // Supabase's wording for any failure in the database during sign-up; never show it as is.
+    if (/Database error/i.test(error?.message ?? '')) return 'Couldn’t create your account right now. Please try again in a moment.';
     return error?.message || 'Couldn’t connect. Please try again.';
   }
 
@@ -267,10 +283,11 @@
     setPending(true, action);
     say(action === 'up' ? 'Creating your account…' : 'Signing in…');
     try {
+      const turnstile = action === 'up' && human ? await human.token() : undefined;
       const { data, error } = action === 'up'
         ? await db.auth.signUp({
           ...credentials,
-          options: { emailRedirectTo: new URL('/login', window.location.origin).href },
+          options: { emailRedirectTo: new URL('/login', window.location.origin).href, ...(turnstile ? { data: { turnstile } } : {}) },
         })
         : await db.auth.signInWithPassword(credentials);
       if (error) throw error;
@@ -281,8 +298,10 @@
         ? 'Check your inbox to confirm your email, then sign in here.'
         : 'Your session couldn’t be established. Please try signing in again.');
     } catch (error) {
-      say(authErrorMessage(error), 'error');
+      if (action === 'up' && await beta?.signUpFailed(error)) say('');
+      else say(authErrorMessage(error), 'error');
     } finally {
+      if (action === 'up') human?.reset();
       setPending(false);
     }
   });
