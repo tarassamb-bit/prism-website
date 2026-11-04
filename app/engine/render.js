@@ -150,7 +150,8 @@ export async function render(source, segment, options) {
   const layers = elements(segment);
   const output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target: new BufferTarget() });
   if (metadata.title || metadata.description) output.setMetadataTags({ title: metadata.title || undefined, description: metadata.description || undefined });
-  const videoSource = new CanvasSource(canvas, { codec, bitrate, keyFrameInterval: 2 });
+  // Safari's encoder in the default "quality" mode takes a few frames and then never answers; "realtime" encodes every frame.
+  const videoSource = new CanvasSource(canvas, { codec, bitrate, keyFrameInterval: 2, latencyMode: 'realtime' });
   output.addVideoTrack(videoSource, { frameRate: FPS });
   const keepAudio = segment.isMuted !== true && source.audio;
   const audioSource = keepAudio ? new AudioSampleSource({ codec: 'aac', bitrate: 160_000 }) : null;
