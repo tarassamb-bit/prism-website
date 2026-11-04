@@ -223,3 +223,19 @@ assert.equal(file.length, 54);
 assert.deepEqual([1, 2, 3, 4, 5].map((i) => view.getInt16(44 + (i - 1) * 2, true)), [0, 32767, -32767, 32767, -32767]);
 
 console.log('engine checks passed');
+
+// Word timing: AI guesses 0.6 s late are moved onto the speech actually heard, keeping words and order; a pause stays a pause.
+{
+  const levels = new Float32Array(600).fill(0.001);
+  const speak = (from, to) => { for (let i = Math.round(from * 100); i < Math.round(to * 100); i++) levels[i] = 0.2; };
+  speak(1, 2); speak(3, 3.8);
+  const runs = T.speechRuns(levels, 0);
+  assert.equal(runs.length, 2);
+  const guessed = [['Hello', 1.6, 0.4], ['there,', 2.0, 0.5], ['good', 3.6, 0.3], ['friend.', 3.9, 0.5]].map(([text, start, duration]) => ({ text, start, duration }));
+  const fixed = T.alignToSpeech(guessed, runs);
+  assert.deepEqual(fixed.map((w) => w.text), ['Hello', 'there,', 'good', 'friend.']);
+  assert.ok(Math.abs(fixed[0].start - 1) < 0.06 && Math.abs(fixed[1].start + fixed[1].duration - 2) < 0.06, 'first phrase sits on the first stretch of speech');
+  assert.ok(Math.abs(fixed[2].start - 3) < 0.06 && Math.abs(fixed[3].start + fixed[3].duration - 3.8) < 0.06, 'second phrase sits on the second');
+  assert.deepEqual(T.alignToSpeech(guessed, []), guessed, 'no speech found: timings unchanged');
+}
+console.log('word timing checks passed');
