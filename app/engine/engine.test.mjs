@@ -8,7 +8,7 @@ import { pages, elements, estimatedWords } from './captions.js';
 import { cropPositionAt, layoutAt, boxBlur } from './render.js';
 import { regionInterval } from './models.js';
 import { retryDelay } from './gemini.js';
-import { resample, wav } from './media.js';
+import { resample, wav, barsFromFrames } from './media.js';
 import { mergePlan, resolveConflict } from './syncplan.js';
 
 const cue = (text, start, duration) => ({ text, start, duration });
@@ -135,6 +135,16 @@ const [crop] = layoutAt({ cropKeyframes: [], cropPosition: 0.5 }, 0, 1920, 1080)
 assert.ok(Math.abs(crop.sw / crop.sh - 1080 / 1920) < 1e-6);
 assert.ok(crop.sx >= 0 && crop.sx + crop.sw <= 1920 + 1e-6);
 assert.equal(layoutAt({ fitToFrame: true }, 0, 1920, 1080)[0].kind, 'fit');
+// Burned-in black bars: a black run from an edge counts only where it meets the picture sharply; the widest real one wins.
+const frame = (top, bottom, edge = 200) => [...Array(top).fill(0), edge, ...Array(86 - top - bottom).fill(150), edge, ...Array(bottom).fill(0)];
+assert.deepEqual(barsFromFrames([frame(5, 5), frame(7, 5)], 360), { top: 33, bottom: 25 }, 'the widest bar across shots');
+assert.deepEqual(barsFromFrames([frame(0, 0)], 360), { top: 0, bottom: 0 });
+const ramp = [0, 0, 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55], fading = [...ramp, ...Array(60).fill(150), ...[...ramp].reverse()];
+assert.deepEqual(barsFromFrames([fading], 360), { top: 0, bottom: 0 }, 'a dark scene fading out is not a bar');
+assert.deepEqual(barsFromFrames([Array(88).fill(0)], 360), { top: 0, bottom: 0 }, 'an all-black frame is not bars');
+assert.equal(barsFromFrames([frame(40, 0)], 360).top, Math.ceil(23 * 360 / 88), 'at most a quarter of the picture');
+const barred = layoutAt({ cropKeyframes: [], cropPosition: 0.5, cropZoom: 1 }, 0, 640, 360, { top: 29, bottom: 21 })[0];
+assert.ok(barred.sy >= 29 - 1e-9 && barred.sy + barred.sh <= 360 - 21 + 1e-9, 'the crop leaves out both bars');
 assert.equal(layoutAt({ splitScreen: true, splitCenters: [0.25, 0.75] }, 0, 1920, 1080).length, 2);
 assert.equal(layoutAt({ cropKeyframes: [{ time: 0, position: 0.5, preserveWholeFrame: true }] }, 0, 1920, 1080)[0].kind, 'fit');
 
