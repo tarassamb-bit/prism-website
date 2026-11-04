@@ -1608,6 +1608,8 @@ function openExportDialog(onlyId = null) {
   });
 }
 
+const STALL_MS = 45_000;
+
 async function exportShorts(ids, quality, folder = null) {
   const task = beginTask('Exporting…');
   const settings = exportSettings(quality);
@@ -1620,11 +1622,22 @@ async function exportShorts(ids, quality, folder = null) {
       const source = await sourceFor(media);
       const label = segment.suggestedTitle?.trim() || `${state.project.title} Short ${state.project.segments.indexOf(segment) + 1}`;
       setTask(`Exporting ${index + 1} of ${ids.length} · ${label}`, index / ids.length);
-      const blob = await render(source, segment, {
+      // A browser whose encoder or decoder stops answering would leave the export waiting forever; name the step instead.
+      let lastStep = 'opening the video', lastActive = Date.now(), watchdog;
+      const active = () => { lastActive = Date.now(); };
+      const stalled = new Promise((_, reject) => {
+        watchdog = setInterval(() => {
+          if (Date.now() - lastActive < STALL_MS) return;
+          task.controller.abort();
+          reject(new Error(`The export stopped while ${lastStep} and made no progress for ${STALL_MS / 1000} seconds. Try 720p · H.264, or another browser.`));
+        }, 1000);
+      });
+      const blob = await Promise.race([stalled, render(source, segment, {
         ...settings, quality, signal: task.controller.signal,
         metadata: { title: segment.suggestedTitle?.trim() ?? '', description: segment.suggestedDescription?.trim() ?? '' },
-        progress: (fraction) => setTask(`Exporting ${index + 1} of ${ids.length} · ${label}`, (index + fraction) / ids.length),
-      });
+        step: (name) => { lastStep = name; active(); },
+        progress: (fraction) => { lastStep = 'rendering the video'; active(); setTask(`Exporting ${index + 1} of ${ids.length} · ${label}`, (index + fraction) / ids.length); },
+      })]).finally(() => clearInterval(watchdog));
       const base = await uniqueName(folder, safeName(label));
       await saveFile(folder, blob, `${base}.mp4`);
       const notes = [segment.suggestedTitle?.trim(), segment.suggestedDescription?.trim()].filter(Boolean).join('\n\n');
@@ -1634,7 +1647,7 @@ async function exportShorts(ids, quality, folder = null) {
     }
   } catch (error) {
     endTask(task);
-    if (task.controller.signal.aborted) return;
+    if (task.cancelled) return;
     return showError('Couldn’t export', error.message);
   }
   endTask(task);

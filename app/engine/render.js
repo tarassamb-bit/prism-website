@@ -136,10 +136,11 @@ export function drawFrame(ctx, sample, segment, sourceWidth, sourceHeight, time)
  * The video's audio is kept unless the Short is muted.
  */
 export async function render(source, segment, options) {
-  const { width = 1080, height = 1920, codec = 'avc', bitrate = 12e6, metadata = {}, progress = () => {}, signal } = options;
+  const { width = 1080, height = 1920, codec = 'avc', bitrate = 12e6, metadata = {}, progress = () => {}, step = () => {}, signal } = options;
   if (![segment.start, segment.duration].every(Number.isFinite) || segment.start < 0 || segment.duration <= 0 || segment.start + segment.duration > source.duration + 0.05) {
     throw new ShortMakerError('invalidRange');
   }
+  step('checking the video encoder');
   if (!(await canEncodeVideo(codec, { width, height, bitrate }).catch(() => false))) {
     throw new ShortMakerError('cannotExport', codec === 'hevc' ? "This browser can't encode HEVC; choose 1080p · H.264." : 'This browser cannot encode H.264 video.');
   }
@@ -154,7 +155,9 @@ export async function render(source, segment, options) {
   const keepAudio = segment.isMuted !== true && source.audio;
   const audioSource = keepAudio ? new AudioSampleSource({ codec: 'aac', bitrate: 160_000 }) : null;
   if (audioSource) output.addAudioTrack(audioSource);
+  step('starting the encoder');
   await output.start();
+  step('reading the first frame');
   const count = Math.max(1, Math.round(segment.duration * FPS));
   const start = segment.start;
   const cancelled = () => signal?.throwIfAborted();
@@ -184,6 +187,7 @@ export async function render(source, segment, options) {
     previous?.close();
     if (next === 0) throw new ShortMakerError('noVideo');
     if (audioSource) {
+      step('adding the sound');
       const audioSink = new AudioSampleSink(source.audio);
       for await (const sample of audioSink.samples(start, start + segment.duration)) {
         cancelled();
@@ -198,6 +202,7 @@ export async function render(source, segment, options) {
     }
     videoSource.close();
     audioSource?.close();
+    step('finishing the file');
     await output.finalize();
   } catch (error) {
     await output.cancel().catch(() => {});
