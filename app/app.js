@@ -1427,29 +1427,36 @@ function renderInspector() {
   const segment = selected();
   if (!segment) { host.innerHTML = '<p class="muted small">Select a Short to edit it.</p>'; return; }
   const styleOptions = CAPTION_STYLES.map((s) => `<option value="${s}" ${s === (segment.captionStyle ?? 'classic') ? 'selected' : ''}>${STYLE_TITLES[s]}</option>`).join('');
+  const choice = (field, values, fallback) => values.map((v) => `<option value="${v}" ${v === (segment[field] ?? fallback) ? 'selected' : ''}>${v[0].toUpperCase() + v.slice(1)}</option>`).join('');
   host.innerHTML = `
-    <div class="stack">
+    <div class="insp">
       <label>Title <input data-field="suggestedTitle" value="${esc(segment.suggestedTitle ?? '')}"></label>
       ${segment.captionNotice ? `<p class="notice small">${esc(segment.captionNotice)}</p>` : ''}
-      <fieldset class="stack"><legend>Captions</legend>
+      <section class="insp-section">
+        <h3>Captions</h3>
+        <canvas class="style-preview wide" id="inspector-style" aria-label="Caption style preview"></canvas>
         <label>Style <select data-field="captionStyle">${styleOptions}</select></label>
-        <canvas class="style-preview" id="inspector-style" aria-label="Caption style preview"></canvas>
-        <label>Position <select data-field="captionPosition">${['top', 'middle', 'bottom'].map((p) => `<option value="${p}" ${p === (segment.captionPosition ?? 'bottom') ? 'selected' : ''}>${p[0].toUpperCase() + p.slice(1)}</option>`).join('')}</select></label>
-        <label>Size <select data-field="captionSize">${['small', 'medium', 'large'].map((p) => `<option value="${p}" ${p === (segment.captionSize ?? 'medium') ? 'selected' : ''}>${p[0].toUpperCase() + p.slice(1)}</option>`).join('')}</select></label>
+        <div class="insp-pair">
+          <label>Position <select data-field="captionPosition">${choice('captionPosition', ['top', 'middle', 'bottom'], 'bottom')}</select></label>
+          <label>Size <select data-field="captionSize">${choice('captionSize', ['small', 'medium', 'large'], 'medium')}</select></label>
+        </div>
         <label class="check"><input type="checkbox" data-field="captionAnimated" ${segment.captionAnimated ? 'checked' : ''}> Pop in new captions</label>
-        <label>Caption lines <textarea data-field="captionTexts" rows="4">${esc((segment.captions ?? []).map((c) => c.text).join('\n'))}</textarea></label>
-        <button class="button ghost" data-action="regen-captions">Regenerate subtitles</button>
-      </fieldset>
-      <details class="more"><summary>More</summary><div class="stack">
+        <label>Words <textarea data-field="captionTexts" rows="4">${esc((segment.captions ?? []).map((c) => c.text).join('\n'))}</textarea></label>
+        <button class="link-button" data-action="regen-captions">Regenerate subtitles</button>
+      </section>
+      <details class="insp-section">
+        <summary><h3>Picture and sound</h3></summary>
+        <div class="stack">
         <label class="check"><input type="checkbox" data-field="splitScreen" ${segment.splitScreen ? 'checked' : ''}> Split screen (two speakers)</label>
         <label class="check"><input type="checkbox" data-field="fitToFrame" ${segment.fitToFrame ? 'checked' : ''}> Show the whole frame</label>
         <label class="check"><input type="checkbox" data-field="isMuted" ${segment.isMuted ? 'checked' : ''}> Mute audio</label>
         <label>On-screen text <input data-field="caption" value="${esc(segment.caption ?? '')}"></label>
-        <button class="button ghost" data-action="retrack">Re-track the subject</button>
-      </div></details>
-      <div class="row between">
-        <button class="button ghost danger" data-action="remove">Remove Short</button>
-        <button class="button ghost" data-action="export-one">Export this Short</button>
+        <button class="link-button" data-action="retrack">Re-track the subject</button>
+        </div>
+      </details>
+      <div class="insp-actions">
+        <button class="button primary" data-action="export-one">Export this Short</button>
+        <button class="link-button danger" data-action="remove">Remove Short</button>
       </div>
     </div>`;
   stylePreview($('#inspector-style'), segment.captionStyle ?? 'classic');
