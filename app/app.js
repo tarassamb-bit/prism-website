@@ -9,6 +9,7 @@ import { STYLE_TITLES, STYLE_DETAILS, VIDEO_TYPE_TITLES, VIDEO_TYPE_DETAILS, REG
 import { stylePreview } from './engine/captions.js';
 import { mountPlayer, unmountPlayer } from './player.js';
 import * as store from './store.js';
+import { hintFor, TOUR_STEPS } from './tour.js';
 import { configureSync, requestSync, sync, syncStatus, onSyncStatus } from './sync.js';
 import { uploadVideo, downloadVideo, removeVideos, removeAllVideos, cloudUsage, CloudVideoError } from './cloudvideo.js';
 
@@ -43,9 +44,20 @@ async function accessToken() {
   return (await db()?.auth.getSession())?.data.session?.access_token ?? null;
 }
 
+/** Background work must never borrow the next account's session. */
+function accountToken(account = userId()) {
+  return async () => {
+    const session = (await db()?.auth.getSession())?.data.session;
+    if (!account || userId() !== account || session?.user?.id !== account) throw new DOMException('The signed-in account changed.', 'AbortError');
+    return session.access_token;
+  };
+}
+
 async function refreshUsage() {
   if (!state.session) return;
+  const account = userId();
   const { data, error } = await db().rpc('my_usage');
+  if (userId() !== account) return;
   state.usage = !error && data?.[0] ? { used: data[0].used, allowance: data[0].allowance } : null;
   renderUsage();
 }
@@ -90,6 +102,7 @@ async function route() {
       if (state.create?.project) { state.create.step = step; setScreen('create'); renderCreate(); }
       else startCreate();
     } else if (first === 'settings') await showSettings(second);
+    else if (first === 'games') { if (state.task?.project) await showGames(); else await showHome(); }
     else if (first === 'folder' && second) {
       const folder = (await store.listFolders()).filter(isMine).find((f) => f.id.startsWith(idOf(second)));
       await showHome(folder ? { folderId: folder.id } : null);
@@ -101,11 +114,47 @@ async function route() {
   // The address as the screen itself spells it (a short link or an old name becomes the proper one).
   if (state.path && location.pathname !== state.path) history.replaceState(null, '', state.path);
 }
-window.addEventListener('popstate', () => route());
+window.addEventListener('popstate', async () => {
+  // The browser's Back button leaves the screen too: stay put unless the person stops the task.
+  if (state.task && !(await confirmStop())) return history.pushState(null, '', state.path);
+  route();
+});
 
 // MARK: Boot and the app shell (sidebar, title bar and sign-in card, as in the macOS app)
 
-const SCREEN_TITLES = { home: 'Home', create: 'Create Shorts', settings: 'Settings' };
+const SCREEN_TITLES = { home: 'Home', create: 'Create Shorts', settings: 'Settings', games: 'Play while you wait' };
+
+/** Account changes can arrive from another tab while an editor or AI request is open. */
+function setSession(session) {
+  const changedAccount = userId() !== (session?.user?.id ?? null);
+  state.session = session;
+  if (!changedAccount) return false;
+  uploadController?.abort();
+  lastDownload = null;
+  videoBlock = null;
+  uploadProblem = null;
+  if (state.task) {
+    state.task.cancelled = true;
+    state.task.controller.abort();
+    endTask(state.task);
+  }
+  closeGames();
+  closeDialog();
+  unmountPlayer();
+  state.previewToken++;
+  state.project = null;
+  state.create = null;
+  state.selectedId = null;
+  state.undo = [];
+  state.projects = [];
+  state.folders = [];
+  state.usage = null;
+  for (const source of state.sources.values()) source.input.dispose();
+  state.sources.clear();
+  $('#app')?.replaceChildren();
+  renderUsage();
+  return true;
+}
 
 async function boot() {
   if (!('VideoDecoder' in window && 'VideoEncoder' in window && 'OffscreenCanvas' in window)) {
@@ -122,16 +171,16 @@ async function boot() {
     afterSync: () => { removePendingVideos(); uploadPending(); expireUntouched(); },
   });
   applyTheme(savedTheme());
-  applyCollapsed(savedSidebar() === '1');
   if (!db()) {
     await route();
     return renderGate('Sign-in is unavailable right now. Check your connection and reload.');
   }
   state.session = (await db().auth.getSession()).data.session;
   db().auth.onAuthStateChange((_event, session) => {
-    state.session = session;
+    const changedAccount = setSession(session);
     renderGate();
-    if (session) { refreshUsage(); requestSync(0); }
+    // Leave the auth callback before making another Supabase request.
+    if (changedAccount) setTimeout(() => { route(); if (state.session) { refreshUsage(); requestSync(0); } }, 0);
   });
   // Captions draw on canvas, which never waits for a font: load the Latin and Cyrillic caption faces first.
   await Promise.all([document.fonts.load('800 66px "Relio Captions"', 'Aa Яя ĄŁ'), document.fonts.load('500 46px Sora')]).catch(() => {});
@@ -157,18 +206,6 @@ function setScreen(screen) {
   for (const button of document.querySelectorAll('.side-button')) {
     button.classList.toggle('selected', button.dataset.screen === screen);
   }
-}
-
-function savedSidebar() {
-  try { return localStorage.getItem('prism-sidebar'); } catch { return null; }
-}
-function applyCollapsed(collapsed) {
-  $('.shell').classList.toggle('collapsed', collapsed);
-  const button = $('.collapse-button');
-  button.setAttribute('aria-expanded', String(!collapsed));
-  button.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
-  button.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
-  try { localStorage.setItem('prism-sidebar', collapsed ? '1' : '0'); } catch { /* the choice just isn't remembered */ }
 }
 
 function savedTheme() {
@@ -249,22 +286,110 @@ async function expireUntouched() {
 }
 
 /** Once per account: the 7-day rule, before it can surprise anyone. */
-function retentionNotice() {
-  const key = `relio.retention-notice.${userId()}`;
-  try { if (localStorage.getItem(key)) return; localStorage.setItem(key, '1'); } catch { /* storage blocked: show it each time */ }
-  openDialog(`<div class="stack"><h2>Projects you don’t edit are deleted after ${UNTOUCHED_DAYS} days</h2>
+// First sign-in: a welcome, then a guided tour through the first project. Hints point at the real buttons, one at a time,
+// and follow the person's own steps: Start creating, the video, the settings, the wait, the first Shorts and Export. The
+// early hints come from where the person is; only the last ones need a saved stage ('on' -> 'edit' -> 'export' -> 'done').
+// Settings › Account › Show tutorial starts it again.
+const tourKey = () => `relio.tour.${userId()}`;
+const tourStage = () => { try { return localStorage.getItem(tourKey()); } catch { return null; } };
+function setTourStage(stage) { try { localStorage.setItem(tourKey(), stage); } catch { /* storage blocked: the tour ends with this page */ } tourHint(); }
+
+/** The hint for this moment (see tour.js), with what its button does. Null when there is none. */
+function currentHint() {
+  const hint = hintFor({ stage: tourStage(), dialog: Boolean(state.dialog), screen: state.screen, running: Boolean(state.task?.project),
+    createStep: state.create?.step ?? null, shorts: state.project?.segments.length ?? 0,
+    made: (state.projects ?? []).some((p) => !p.trashed && p.segments.length > 0) });
+  if (hint?.then) hint.next = hint.then === 'finish' ? finishTour : () => setTourStage(hint.then);
+  if (hint?.back) hint.previous = () => setTourStage(hint.back);
+  return hint;
+}
+function welcomeTour() {
+  openDialog(`<div class="stack"><h2>Welcome to Relio Clips</h2>
+    <p>Relio turns one long video into short vertical clips (Shorts), with captions, ready for TikTok, Reels and YouTube Shorts.</p>
+    <p class="muted small">A short tour shows you each step while you make your first Shorts.</p>
+    <div class="row end"><button class="button ghost" id="tour-no">Skip the tour</button><button class="button primary" id="tour-yes">Show me how</button></div></div>`);
+  // Esc or a click outside leaves the tour on: its first hint has its own Skip.
+  $('#tour-no').addEventListener('click', () => { closeDialog(); track('tour_skipped', { step: 0 }); endTour(); });
+  $('#tour-yes').addEventListener('click', () => { closeDialog(); track('tour_started'); tourHint(); });
+  $('#tour-yes').focus();
+}
+/** Skipped: the deletion rule is the one thing nobody may miss, so it is still shown. */
+function endTour() {
+  setTourStage('done');
+  showRetention();
+}
+function finishTour() {
+  track('tour_finished');
+  setTourStage('done');
+  showRetention('You’ve made your first Shorts! One thing to know');
+}
+
+let tourFrame = 0, tourTarget = null;
+/** Shows, moves or removes the hint. Runs whenever the page changes (see the observer below). */
+function tourHint() {
+  cancelAnimationFrame(tourFrame);
+  tourFrame = requestAnimationFrame(() => {
+    const hint = currentHint(), target = hint && $(hint.target);
+    let bubble = $('#tour-bubble'), ring = $('#tour-ring');
+    if (!hint || !target || !target.getBoundingClientRect().width) { bubble?.remove(); ring?.remove(); tourTarget = null; return; }
+    if (!bubble) {
+      document.body.insertAdjacentHTML('beforeend', '<div id="tour-ring" class="tour-ring" aria-hidden="true"></div><div id="tour-bubble" class="tour-bubble" role="status"></div>');
+      bubble = $('#tour-bubble'); ring = $('#tour-ring');
+    }
+    // A target below the fold is brought into view once, when the hint first points at it.
+    if (tourTarget !== target) { tourTarget = target; target.scrollIntoView({ block: 'nearest' }); }
+    const html = `<p class="eyebrow">Step ${hint.step} of ${TOUR_STEPS}</p><div class="tour-bar" aria-hidden="true"><div style="width:${Math.round((hint.step / TOUR_STEPS) * 100)}%"></div></div><p>${hint.text}</p>
+      <div class="row between"><button class="link" id="tour-skip">Skip tour</button>${hint.button ? `<span class="row tour-buttons">${hint.back ? '<button class="button ghost" id="tour-back">Back</button>' : ''}<button class="button primary" id="tour-next">${hint.button}</button></span>` : ''}</div>`;
+    if (bubble.dataset.html !== html) {
+      bubble.dataset.html = html;
+      bubble.innerHTML = html;
+      $('#tour-skip').addEventListener('click', () => { track('tour_skipped', { step: hint.step }); endTour(); });
+      $('#tour-back')?.addEventListener('click', hint.previous);
+      $('#tour-next')?.addEventListener('click', hint.next);
+    }
+    const rect = target.getBoundingClientRect();
+    Object.assign(ring.style, { left: `${rect.left - 6}px`, top: `${rect.top - 6}px`, width: `${rect.width + 12}px`, height: `${rect.height + 12}px` });
+    // Below the target when there is room, otherwise above it; always inside the window. The arrow points at the target's middle.
+    const width = bubble.offsetWidth, height = bubble.offsetHeight, gap = 16;
+    const below = rect.bottom + gap + height < innerHeight;
+    const left = Math.min(Math.max(8, rect.left + rect.width / 2 - width / 2), innerWidth - width - 8);
+    bubble.dataset.side = below ? 'below' : 'above';
+    bubble.style.setProperty('--arrow-x', `${Math.min(Math.max(18, rect.left + rect.width / 2 - left), width - 18)}px`);
+    Object.assign(bubble.style, { left: `${left}px`, top: `${below ? rect.bottom + gap : Math.max(8, rect.top - gap - height)}px` });
+  });
+}
+new MutationObserver(tourHint).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden'] });
+addEventListener('resize', tourHint);
+addEventListener('scroll', tourHint, true);
+function showTutorial() { setTourStage('on'); showHome(); }
+
+const retentionKey = () => `relio.retention-notice.${userId()}`;
+function firstRunNotice() {
+  const seen = (key) => { try { return localStorage.getItem(key); } catch { return '1'; } };
+  // Accounts that already saw the deletion notice aren't new; they can start the tour from Settings.
+  if (!tourStage() && !seen(retentionKey())) { setTourStage('on'); return welcomeTour(); }
+  // During the tour the deletion rule waits for its end (finishTour, endTour).
+  if (['on', 'edit', 'export'].includes(tourStage())) return;
+  if (!seen(retentionKey())) showRetention();
+}
+
+function showRetention(title = `Projects you don’t edit are deleted after ${UNTOUCHED_DAYS} days`) {
+  try { localStorage.setItem(retentionKey(), '1'); } catch { /* storage blocked: shown again next time */ }
+  openDialog(`<div class="stack"><h2>${title}</h2>
     <p>If you don’t change a project for ${UNTOUCHED_DAYS} days, Relio deletes it: the video, its Shorts and everything else in it, on this device and in the cloud. Any edit, re-analysis or export, like moving a clip on the timeline, starts a new ${UNTOUCHED_DAYS}-day period. You’ll see a warning on Home 2 days before.</p>
     <p class="muted small">Export the Shorts you want to keep. Exported files on your computer are never touched.</p>
     <div class="row end"><button class="button primary" data-action="close">Got it</button></div></div>`);
 }
 
 async function showHome(view = null) {
+  const account = userId();
   state.project = null;
   state.create = null;
   state.homeView = view;
   setScreen('home');
-  if (userId()) retentionNotice();
+  if (userId()) firstRunNotice();
   const [everything, allFolders] = await Promise.all([store.listProjects(), store.listFolders()]);
+  if (userId() !== account || state.screen !== 'home') return;
   const all = everything.filter(isMine), folders = allFolders.filter(isMine);
   state.projects = all;
   state.folders = folders;
@@ -275,6 +400,7 @@ async function showHome(view = null) {
     for (const m of p.media) if (!(await store.hasFile(m.id))) missing.push(m);
     if (missing.length) noVideo.set(p.id, missing.every((m) => m.cloud?.uploaded));
   }
+  if (userId() !== account || state.screen !== 'home') return;
   // There is no Trash anymore: projects still in it were meant to go, so they are deleted, here and in the cloud.
   const trashed = all.filter((p) => p.trashed);
   if (trashed.length) {
@@ -289,12 +415,14 @@ async function showHome(view = null) {
 
   const card = (p) => {
     const poster = p.media.find((m) => m.thumbnail)?.thumbnail;
-    const info = `${plural(p.segments.length, 'Short')} · ${dateText(p.updated ?? p.created)}`;
+    const making = remoteTask(p.id);
+    const info = making ? `<span class="making small"><span class="spinner" aria-hidden="true"></span><span>${remoteText(making)}</span></span>`
+      : `<span class="muted small">${plural(p.segments.length, 'Short')} · ${dateText(p.updated ?? p.created)}</span>`;
     const left = daysLeft(p);
     const expiry = left <= 2 ? `<span class="missing small">${left <= 1 ? 'Deleted tomorrow' : `Deleted in ${left} days`} unless you edit or export it</span>` : '';
     const away = noVideo.has(p.id) && !noVideo.get(p.id) ? '<span class="missing small">Video not on this device</span>' : '';
     const body = `<div class="poster">${poster ? `<img alt="" src="${poster}">` : ''}<span class="badge">${clock(p.media[0]?.duration ?? 0)}</span></div>
-          <strong class="p-title">${esc(p.title)}</strong><span class="muted small">${info}</span>${expiry}${away}`;
+          <strong class="p-title">${esc(p.title)}</strong>${info}${expiry}${away}`;
     return `<div class="project-card" draggable="true" data-project="${esc(p.id)}">
           <button class="open" data-action="open" data-id="${esc(p.id)}">${body}</button>
           <button class="card-menu" data-action="project-menu" data-id="${esc(p.id)}" aria-label="Options for ${esc(p.title)}" aria-haspopup="menu">⋯</button></div>`;
@@ -371,20 +499,29 @@ async function changeProject(id, change) {
 async function deleteAccount() {
   const user = state.session?.user;
   if (!user || !confirm(`Are you sure you want to delete your account ${user.email}? Your projects, Shorts, stats and every video in the cloud are deleted for good. This can't be undone.`)) return;
-  const note = (text) => { if ($('#delete-account-note')) $('#delete-account-note').textContent = text; };
+  const note = (text) => { if (userId() === user.id && $('#delete-account-note')) $('#delete-account-note').textContent = text; };
+  const token = accountToken(user.id);
   note('Deleting…');
   try {
-    await removeAllVideos({ token: accessToken });
+    await removeAllVideos({ token });
   } catch (error) {
     // Stop here, so no video is left behind in the cloud without an account; with no cloud storage set up there is nothing to remove.
     if (error.kind !== 'unavailable') return note(`Your account wasn't deleted: ${error.message}`);
   }
-  const { error } = await db().rpc('delete_my_account');
+  let result;
+  try {
+    const jwt = await token();
+    // Pin the confirmed account even if Supabase refreshes its shared session before sending.
+    result = await db().rpc('delete_my_account').setHeader('Authorization', `Bearer ${jwt}`);
+  } catch (error) { return note(`Your account wasn't deleted: ${error.message}`); }
+  const { error } = result;
   if (error) return note(`Your account wasn't deleted: ${error.message}`);
   await store.deleteOwner(user.id);
-  await db().auth.signOut().catch(() => {});
-  state.session = null;
-  renderGate();
+  if (userId() === user.id) {
+    await db().auth.signOut().catch(() => {});
+    if (userId() === user.id) setSession(null);
+    renderGate();
+  }
 }
 
 async function deleteProjectNow(id) {
@@ -562,6 +699,9 @@ function startCreate({ project = null, media = null, file = null } = {}) {
 async function chooseVideo(file) {
   track('video_selected');
   const c = state.create;
+  if (!c) return;
+  const account = userId();
+  const isCurrent = () => state.create === c && userId() === account;
   c.error = '';
   c.busy = true;
   renderCreate();
@@ -569,14 +709,15 @@ async function chooseVideo(file) {
     // A video chosen before and never used for Shorts leaves nothing behind.
     if (c.project && c.project.segments.length === 0) await store.deleteProject(c.project);
     const project = { id: uuid(), owner: userId(), title: file.name.replace(/\.[^.]+$/, ''), created: new Date().toISOString(), media: [], segments: [], transcripts: {} };
-    const media = await importMedia(project, file);
+    const media = await importMedia(project, file, isCurrent);
+    if (!isCurrent()) return;
     await store.saveProject(project);
     Object.assign(c, { project, media, customEnd: Math.round(media.duration / 6) / 10, step: 2 });
   } catch (error) {
     c.error = error.message || 'That file is not a video this browser can read.';
   }
   c.busy = false;
-  renderCreate();
+  if (isCurrent()) renderCreate();
 }
 
 /** Why the custom range can't be used, or null when it can. */
@@ -695,6 +836,7 @@ const syncText = (s) => ({
 onSyncStatus((s) => { const el = $('#sync-text'); if (el) el.textContent = syncText(s); });
 
 async function showSettings(tab = state.settingsTab ?? 'account') {
+  const account = userId();
   // Old addresses: the export history moved into Overview, and plans are switched off for now.
   if (tab === 'exports' || tab === 'plans') tab = 'overview';
   if (!SETTINGS_TABS.includes(tab)) tab = 'account';
@@ -702,6 +844,7 @@ async function showSettings(tab = state.settingsTab ?? 'account') {
   setScreen('settings');
   setUrl(`/app/settings/${tab}`);
   if (state.session && tab === 'usage') await refreshUsage();
+  if (userId() !== account || state.screen !== 'settings' || state.settingsTab !== tab) return;
   const u = state.usage;
   const email = state.session?.user?.email;
   const used = u ? `${Math.ceil(u.used)} of ${Math.floor(u.allowance)} min used` : 'Minutes used';
@@ -739,7 +882,7 @@ async function showSettings(tab = state.settingsTab ?? 'account') {
     body = `<div class="box">
         <div class="who"><span class="avatar" aria-hidden="true">${esc((email ?? '?')[0].toUpperCase())}</span><div><strong>${email ? esc(email) : 'Not signed in'}</strong><span class="muted small">${email ? 'Signed in' : 'Sign in to track your stats'}</span></div></div>
         <p class="muted small">Your projects, Shorts and videos are saved to your account, and each export adds its date, number of Shorts, length and quality to your stats under Overview.</p>
-        ${email ? '<div class="row"><button class="button ghost" data-action="signout">Sign out</button><button class="button ghost danger" data-action="delete-account">Delete account</button></div><p id="delete-account-note" class="error small" role="alert"></p>' : ''}
+        ${email ? '<div class="row"><button class="button ghost" data-action="tutorial">Show tutorial</button><button class="button ghost" data-action="signout">Sign out</button><button class="button ghost danger" data-action="delete-account">Delete account</button></div><p id="delete-account-note" class="error small" role="alert"></p>' : ''}
       </div>
       ${email ? `<form id="profile-form" class="box stack">
         <strong>Profile</strong>
@@ -771,10 +914,11 @@ async function showSettings(tab = state.settingsTab ?? 'account') {
 
 /** Name and username (profiles table): filled in, then saved on Save. Usernames are unique; the database has the last word. */
 async function fillProfile() {
+  const account = userId();
   const form = $('#profile-form');
   if (!form) return;
   const { data, error } = await db().from('profiles').select('display_name, username').maybeSingle();
-  if (!form.isConnected) return;
+  if (!form.isConnected || userId() !== account) return;
   const status = $('#profile-status'), save = form.querySelector('button');
   if (error) { status.textContent = 'Your profile couldn’t load. Try again later.'; return; }
   form.elements.name.value = data?.display_name ?? '';
@@ -790,10 +934,12 @@ async function fillProfile() {
   });
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (userId() !== account || !form.isConnected) return;
     save.disabled = true;
     status.textContent = 'Saving…';
     const username = form.elements.username.value, display_name = form.elements.name.value.trim();
-    const { error: failed } = await db().from('profiles').update({ display_name, username }).eq('user_id', state.session.user.id);
+    const { error: failed } = await db().from('profiles').update({ display_name, username }).eq('user_id', account);
+    if (userId() !== account || !form.isConnected) return;
     status.textContent = !failed ? 'Saved.' : /duplicate|unique/i.test(failed.message) ? `@${username} is taken. Try another.` : 'Couldn’t save. Try again.';
     if (!failed) { $('.who strong').textContent = display_name; $('.who .muted').textContent = `@${username} · ${state.session.user.email}`; }
     else save.disabled = false;
@@ -802,7 +948,8 @@ async function fillProfile() {
 
 /** Loads what the dashboard used to show. Each piece fills in when it arrives, and is dropped if the person has moved to another tab. */
 async function fillAccountData(tab) {
-  const current = () => state.screen === 'settings' && state.settingsTab === tab;
+  const account = userId();
+  const current = () => userId() === account && state.screen === 'settings' && state.settingsTab === tab;
   const text = (id, value) => { const el = $(id); if (el && current()) el.textContent = value; };
   try {
     const totals = await loadExports();
@@ -828,9 +975,10 @@ async function fillAccountData(tab) {
 // Shorter videos rarely hold a whole story worth a Short, and an empty result reads as a broken app.
 const MIN_VIDEO_SECONDS = 3 * 60;
 
-async function importMedia(project, file) {
+async function importMedia(project, file, isCurrent = () => true) {
   const source = await openSource(file);
   if (source.duration < MIN_VIDEO_SECONDS) {
+    source.input.dispose();
     throw new Error(`This video is ${clock(source.duration)} long. Relio needs at least ${MIN_VIDEO_SECONDS / 60} minutes of video to find Shorts in it.`);
   }
   const media = {
@@ -839,18 +987,29 @@ async function importMedia(project, file) {
     created: new Date().toISOString(),
   };
   media.thumbnail = await thumbnail(source, Math.min(1, source.duration / 2)).catch(() => null);
-  await store.saveFile(media.id, file);
+  if (!isCurrent()) { source.input.dispose(); throw new DOMException('Import cancelled.', 'AbortError'); }
+  try { await store.saveFile(media.id, file); }
+  catch (error) { source.input.dispose(); throw error; }
+  if (!isCurrent()) {
+    source.input.dispose();
+    await store.deleteFile(media.id);
+    throw new DOMException('Import cancelled.', 'AbortError');
+  }
   project.media.push(media);
   state.sources.set(media.id, source);
   return media;
 }
 
 async function openProject(id, shortPart = null) {
+  const account = userId();
   try {
     const project = await store.loadProject(id);
+    if (userId() !== account) return;
+    if (project && !isMine(project)) return showHome();
     if (!project) return showHome();
     const missing = [];
     for (const media of project.media) if (!(await store.hasFile(media.id))) missing.push(media);
+    if (userId() !== account) return;
     if (missing.length) return attachVideo(project, missing[0], shortPart);
     state.project = project;
     // An address like .../short-3 opens that Short; otherwise the first one.
@@ -859,6 +1018,7 @@ async function openProject(id, shortPart = null) {
     state.undo = [];
     state.timelineZoom = null;
     for (const media of project.media) await sourceFor(media).catch(() => null);
+    if (state.project !== project || userId() !== account) return;
     renderEditor();
     if (state.selectedId) selectShort(state.selectedId);
   } catch (error) {
@@ -904,6 +1064,8 @@ async function attachVideo(project, media, shortPart, note = '') {
 let downloadAbort = null, lastDownload = null;
 /** The project's video is in the account's cloud storage: download it once, then it is kept on this device and the project opens by itself. */
 async function fetchFromCloud(project, media, shortPart) {
+  const account = userId();
+  if (!account || !isMine(project)) return;
   const controller = new AbortController();
   downloadAbort = controller;
   lastDownload = { project, media, shortPart };
@@ -913,7 +1075,7 @@ async function fetchFromCloud(project, media, shortPart) {
     <div class="row end"><button class="button ghost" data-action="close">Cancel</button></div></div>`);
   try {
     const blob = await downloadVideo({
-      token: accessToken, mediaId: media.cloud.key ?? media.id, type: media.mime || 'video/mp4', size: media.size, signal: controller.signal,
+      token: accountToken(account), mediaId: media.cloud.key ?? media.id, type: media.mime || 'video/mp4', size: media.size, signal: controller.signal,
       onProgress: (fraction, rate) => {
         const bar = $('#dl-bar');
         if (!bar) return;
@@ -923,15 +1085,18 @@ async function fetchFromCloud(project, media, shortPart) {
         $('#dl-text').textContent = `${Math.round(fraction * 100)}% of ${bytes(media.size)}${speed}${left}`;
       },
     });
+    controller.signal.throwIfAborted();
     const file = new File([blob], media.name, { type: blob.type, lastModified: media.lastModified });
     const source = await openSource(file);
+    if (controller.signal.aborted || userId() !== account) { source.input.dispose(); return; }
     await store.saveFile(media.id, file);
+    if (controller.signal.aborted || userId() !== account) { source.input.dispose(); return; }
     state.sources.set(media.id, source);
     downloadAbort = null;
     closeDialog();
     openProject(project.id, shortPart);
   } catch (error) {
-    if (controller.signal.aborted) return;
+    if (controller.signal.aborted || userId() !== account) return;
     downloadAbort = null;
     // Usually a dropped connection: offer another try first, and the file on this device as the fallback.
     openDialog(`<div class="stack"><h2>The video didn’t download</h2>
@@ -944,7 +1109,7 @@ async function fetchFromCloud(project, media, shortPart) {
 // MARK: Videos in the cloud (upload after sync, removal, and the sidebar progress)
 
 // uploadProblem: why the last upload stopped, shown in Settings › Usage so a stalled upload isn't invisible.
-let uploading = false, videoBlock = null, uploadProblem = null;
+let uploading = false, videoBlock = null, uploadProblem = null, uploadController = null;
 function showUpload(text, fraction = 0) {
   const box = $('#upload-status');
   if (!box) return;
@@ -957,11 +1122,15 @@ function showUpload(text, fraction = 0) {
  * was later removed to make room stays on its devices and is not sent again. */
 async function uploadPending() {
   if (uploading || videoBlock || !userId()) return;
+  const account = userId(), token = accountToken(account);
+  const controller = new AbortController();
+  uploadController = controller;
   uploading = true;
   try {
-    await shareDuplicates();
+    await shareDuplicates(account);
     for (const project of (await store.listProjects()).filter(isMine)) {
       for (const media of project.media) {
+        controller.signal.throwIfAborted();
         if (media.cloud) continue;
         const file = await store.loadFile(media.id);
         if (!file) continue;
@@ -969,39 +1138,44 @@ async function uploadPending() {
         const key = media.contentHash ?? media.id;
         const twin = (await store.listProjects()).filter(isMine).flatMap((p) => p.media)
           .find((m) => m.id !== media.id && m.contentHash && m.contentHash === media.contentHash && m.cloud?.uploaded);
-        if (twin) { await setCloud(project.id, media.id, { uploaded: true, bytes: file.size, key: twin.cloud.key ?? twin.id }); continue; }
+        controller.signal.throwIfAborted();
+        if (twin) { await setCloud(project.id, media.id, { uploaded: true, bytes: file.size, key: twin.cloud.key ?? twin.id }, account); continue; }
         const label = `Uploading “${media.name}”`;
         showUpload(label, 0);
         try {
           const { evicted } = await uploadVideo({
-            token: accessToken, media: { ...media, id: key }, file, onProgress: (fraction) => showUpload(label, fraction),
-            askRoom: (evict, cap) => askRoom(media, file, evict, cap),
+            token, signal: controller.signal, media: { ...media, id: key }, file, onProgress: (fraction) => { if (userId() === account) showUpload(label, fraction); },
+            askRoom: (evict, cap) => askRoom(media, file, evict, cap, account),
           });
-          await markRemoved(evicted);
-          await setCloud(project.id, media.id, { uploaded: true, bytes: file.size, key });
+          controller.signal.throwIfAborted();
+          await markRemoved(evicted, account);
+          await setCloud(project.id, media.id, { uploaded: true, bytes: file.size, key }, account);
           uploadProblem = null;
         } catch (error) {
-          if (!(error instanceof CloudVideoError)) throw error;
-          await markRemoved(error.evicted);
-          if (error.kind === 'too_big') await setCloud(project.id, media.id, { tooBig: true });
-          else if (error.kind === 'declined') await setCloud(project.id, media.id, { declined: true });
+          if (!(error instanceof CloudVideoError) || controller.signal.aborted) throw error;
+          await markRemoved(error.evicted, account);
+          if (error.kind === 'too_big') await setCloud(project.id, media.id, { tooBig: true }, account);
+          else if (error.kind === 'declined') await setCloud(project.id, media.id, { declined: true }, account);
           else throw error;
         }
       }
     }
   } catch (error) {
+    if (controller.signal.aborted || userId() !== account) return;
     if (error instanceof CloudVideoError && error.kind === 'unavailable') videoBlock = error;
     else { console.warn('Video upload paused:', error); uploadProblem = error?.message || String(error); setTimeout(uploadPending, 60_000); }
   } finally {
     uploading = false;
+    uploadController = null;
     showUpload(null);
     if ($('#cloud-video-text')) fillCloudVideo();
+    if (userId() && userId() !== account) uploadPending();
   }
 }
 
 /** Earlier uploads stored each project's copy separately: projects with the same video now share one stored copy, and the extra
  * copies are removed from the cloud. */
-async function shareDuplicates() {
+async function shareDuplicates(account = userId()) {
   const byHash = new Map();
   for (const project of (await store.listProjects()).filter(isMine)) {
     for (const media of project.media) {
@@ -1012,37 +1186,34 @@ async function shareDuplicates() {
   }
   let extra = false;
   for (const uses of byHash.values()) {
+    if (userId() !== account) return;
     const keys = [...new Set(uses.map(({ media }) => media.cloud.key ?? media.id))];
     if (keys.length < 2) continue;
-    for (const { project, media } of uses) if ((media.cloud.key ?? media.id) !== keys[0]) await setCloud(project.id, media.id, { ...media.cloud, key: keys[0] });
-    for (const key of keys.slice(1)) store.rememberDeletion('videos', `${userId()}/${key}`);
+    for (const { project, media } of uses) if ((media.cloud.key ?? media.id) !== keys[0]) await setCloud(project.id, media.id, { ...media.cloud, key: keys[0] }, account);
+    if (userId() !== account) return;
+    for (const key of keys.slice(1)) store.rememberDeletion('videos', `${account}/${key}`);
     extra = true;
   }
   if (extra) await removePendingVideos();
 }
 
 /** Records what happened to a project's video in the cloud; sync tells the other devices. */
-async function setCloud(projectId, mediaId, cloud) {
-  const project = await store.loadProject(projectId);
-  const entry = project?.media.find((m) => m.id === mediaId);
-  if (!entry) return;
-  // `at` lets two devices that recorded different outcomes agree on the newest one.
-  entry.cloud = { ...cloud, at: new Date().toISOString() };
-  await store.saveProject(project, { touch: false });
+async function setCloud(projectId, mediaId, cloud, account = userId()) {
+  await store.saveMediaCloud(projectId, mediaId, cloud, (record) => Boolean(account) && userId() === account && (!record.owner || record.owner === account));
 }
 
 /** Videos removed to make room: their projects remember it, so no device waits for them or sends them again. */
-async function markRemoved(keys = []) {
-  if (!keys.length) return;
+async function markRemoved(keys = [], account = userId()) {
+  if (!keys.length || userId() !== account) return;
   for (const project of (await store.listProjects()).filter(isMine)) {
-    for (const media of project.media) if (media.cloud?.uploaded && keys.includes(media.cloud.key ?? media.id)) await setCloud(project.id, media.id, { removed: true });
+    for (const media of project.media) if (media.cloud?.uploaded && keys.includes(media.cloud.key ?? media.id)) await setCloud(project.id, media.id, { removed: true }, account);
   }
 }
 
 /** The warning before old videos are deleted from the cloud. Resolves true (delete them), false (keep them) or null (ask later). */
 let dialogAnswer = null;
-async function askRoom(media, file, evict, cap) {
-  if (state.dialog || state.task) return null;
+async function askRoom(media, file, evict, cap, account = userId()) {
+  if (userId() !== account || state.dialog || state.task) return null;
   const names = new Map();
   // Stored copies are named by fingerprint; every project that uses one is listed.
   for (const project of (await store.listProjects()).filter(isMine)) {
@@ -1052,6 +1223,7 @@ async function askRoom(media, file, evict, cap) {
       names.set(key, names.has(key) ? `${names.get(key)}, ${project.title}` : `${project.title} · ${m.name}`);
     }
   }
+  if (userId() !== account || state.dialog || state.task) return null;
   return new Promise((resolve) => {
     openDialog(`<div class="stack"><h2>Not enough cloud space</h2>
       <p>Your cloud space is ${bytes(cap)}. To keep <strong>${esc(media.name)}</strong> (${bytes(file.size)}) in the cloud, Relio has to delete your oldest videos from it:</p>
@@ -1066,13 +1238,15 @@ async function askRoom(media, file, evict, cap) {
 }
 
 async function removePendingVideos() {
-  const mine = [...store.pendingDeletes('videos')].filter((entry) => entry.startsWith(`${userId()}/`));
+  const account = userId(), token = accountToken(account);
+  const mine = [...store.pendingDeletes('videos')].filter((entry) => entry.startsWith(`${account}/`));
   if (!mine.length) return;
   // A stored video that another project still uses stays.
   const inUse = new Set((await store.listProjects()).filter(isMine).flatMap((p) => p.media).filter((m) => m.cloud?.uploaded).map((m) => m.cloud.key ?? m.id));
   const gone = mine.filter((entry) => !inUse.has(entry.split('/').pop()));
   try {
-    if (gone.length) await removeVideos({ token: accessToken, mediaIds: gone.map((entry) => entry.split('/').pop()) });
+    if (gone.length) await removeVideos({ token, mediaIds: gone.map((entry) => entry.split('/').pop()) });
+    if (userId() !== account) return;
     store.deletionReached('videos', mine);
   } catch (error) {
     if (error instanceof CloudVideoError && error.kind === 'unavailable') return;
@@ -1082,15 +1256,17 @@ async function removePendingVideos() {
 
 /** Settings > Usage: how much cloud video space is used, or why uploads are stopped. */
 async function fillCloudVideo() {
+  const account = userId();
   const text = $('#cloud-video-text');
   if (!text) return;
   $('#retry-upload').hidden = !videoBlock;
   if (videoBlock) { text.textContent = videoBlock.message; return; }
   try {
-    const { used, cap } = await cloudUsage({ token: accessToken });
-    if (!$('#cloud-video-text')) return;
+    const { used, cap } = await cloudUsage({ token: accountToken(account) });
+    if (userId() !== account || !text.isConnected) return;
     // Videos that stay on this device only, and why, so a missing upload is never a mystery.
     const media = (await store.listProjects()).filter(isMine).flatMap((p) => p.media);
+    if (userId() !== account || !text.isConnected) return;
     const local = media.filter((m) => !m.cloud?.uploaded);
     const why = (m) => m.cloud?.tooBig ? 'bigger than your cloud space' : m.cloud?.declined ? 'you kept older videos instead' : uploading ? 'uploading now' : 'waiting to upload';
     const notes = local.map((m) => `“${m.name}” stays on this device: ${why(m)}.`);
@@ -1098,7 +1274,7 @@ async function fillCloudVideo() {
     text.textContent = `${bytes(used)} of ${bytes(cap)} used${notes.length ? ` · ${notes.join(' ')}` : ''}`;
     $('#cloud-video-bar').style.width = `${Math.min(100, cap ? used / cap * 100 : 0)}%`;
   } catch (error) {
-    if ($('#cloud-video-text')) text.textContent = error.message;
+    if (userId() === account && text.isConnected) text.textContent = error.message;
   }
 }
 
@@ -1121,15 +1297,18 @@ async function ensureHashes(project) {
 
 async function sourceFor(media) {
   if (state.sources.has(media.id)) return state.sources.get(media.id);
+  const account = userId();
   const file = await store.loadFile(media.id);
   if (!file) throw new Error(`The file for ${media.name} is missing from this browser. Import it again.`);
   const source = await openSource(file);
+  if (userId() !== account) { source.input.dispose(); throw new Error('The signed-in account changed. Open the video again.'); }
   state.sources.set(media.id, source);
   return source;
 }
 
 async function persist() {
-  if (state.project) await store.saveProject(state.project);
+  const project = state.project;
+  if (project) await store.saveProject(project, { isCurrent: () => state.project === project });
 }
 
 /** The video's name on Relio's server: its SHA-256 (the same value as on the Mac), else a hash of its name and length. */
@@ -1158,7 +1337,8 @@ async function makeShorts(media, options) {
     return showError('Choose a range inside the video', 'The end of the range must come after its start and fall inside the video.');
   }
   if (!state.session) return renderGate();
-  const task = beginTask('Preparing video…');
+  const project = state.project;
+  const task = beginTask('Preparing video…', project);
   let key, minutes, check;
   try {
     key = await serverKey(media);
@@ -1173,9 +1353,11 @@ async function makeShorts(media, options) {
     if (task.controller.signal.aborted) return;
     return showError('Relio couldn’t check your usage right now', 'Try again in a moment.', 'temporary');
   }
+  if (task.controller.signal.aborted || state.task !== task || state.project !== project) return;
   endTask(task);
   if (check.runs === 0) return runShorts(media, options, key, minutes);
   await refreshUsage();
+  if (state.project !== project || state.task) return;
   const left = Math.max(0, (state.usage?.allowance ?? 0) - (state.usage?.used ?? 0));
   if (check.charge > left) {
     track('limit_reached');
@@ -1203,17 +1385,24 @@ function confirmRerun(media, options, usage) {
 
 // A Retry reuses the run id, so the server doesn't count it as a new analysis of the video.
 async function runShorts(media, options, key, minutes, run = uuid()) {
-  if (state.task) return;
-  const source = await sourceFor(media);
+  if (state.task || !state.project) return;
   const project = state.project;
+  let source;
+  try { source = await sourceFor(media); }
+  catch (error) {
+    if (state.project === project && !state.task) reportGenerationError(error);
+    return;
+  }
+  if (state.task || state.project !== project) return;
   const projectId = project.id;
-  const task = beginTask('Preparing video analysis…');
+  const task = beginTask('Preparing video analysis…', project);
+  showGames();
   const usedRanges = project.segments.filter((s) => s.mediaId === media.id).map((s) => ({ start: s.start, end: s.start + s.duration }));
   const saved = project.transcripts?.[media.id] ?? null;
   const configuration = {
-    accessToken,
+    accessToken: accountToken(),
     usage: { video: key, minutes, day: localDay(), run },
-    onRetry: (message) => setTask(message),
+    onRetry: (message) => { if (state.task === task) setTask(message); },
   };
   let missed = 0;
   const retry = (count) => runShorts(media, { ...options, count }, key, minutes, run);
@@ -1232,9 +1421,15 @@ async function runShorts(media, options, key, minutes, run = uuid()) {
       duration: options.duration, count: options.count, region: options.region, customStart: options.region === 'custom' ? options.customStart : null,
       customEnd: options.region === 'custom' ? options.customEnd : null, excluding: usedRanges, videoType: options.videoType, language: options.language, cachedTranscript: saved,
       signal: task.controller.signal,
-      onTranscript: (transcript) => { project.transcripts ??= {}; project.transcripts[media.id] = transcript; },
+      onTranscript: async (transcript) => {
+        const isCurrent = () => state.task === task && !task.controller.signal.aborted && state.project === project;
+        if (!isCurrent()) return;
+        project.transcripts ??= {};
+        project.transcripts[media.id] = transcript;
+        await store.saveTranscript(projectId, media.id, transcript, isCurrent);
+      },
       onMissed: (n) => { missed = n; },
-      progress: (fraction, stage) => setTask(stage, fraction),
+      progress: (fraction, stage) => { if (state.task === task) setTask(stage, fraction); },
     });
     // Every Short flagged as music: sung lyrics, not speech, so there's nothing to caption.
     if (results.length > 0 && results.every((r) => r.warning === Shorts.MUSIC_NOTICE)) throw new GeminiError('musicVideo');
@@ -1258,15 +1453,19 @@ async function runShorts(media, options, key, minutes, run = uuid()) {
       }
       created.push(segment);
     }
-    if (state.project?.id !== projectId) return;
+    if (task.cancelled || state.project?.id !== projectId) return;
+    task.controller.signal.throwIfAborted();
+    if (state.task !== task || state.project !== project) return;
     project.segments.push(...created);
-    await persist();
+    const committed = await store.saveProject(project, { isCurrent: () => state.project === project && state.task === task && !task.controller.signal.aborted });
+    if (committed === false || state.task !== task || state.project !== project) { endTask(task); return; }
     track('analysis_finished', { length: lengthBucket(minutes) });
     track('clips_generated', { clips: created.length });
     endTask(task);
     state.selectedId = created[0].id;
-    renderEditor();
-    selectShort(state.selectedId);
+    // On the games screen the player stays put: a banner on top of the game offers the Shorts.
+    if (state.screen === 'games' && games) games.ready(created.length);
+    else { closeGames(); renderEditor(); selectShort(state.selectedId); }
     // The finished Shorts are saved above; the ones Relio AI couldn't make are offered again instead of silently lost.
     if (missed > 0) {
       showError(`${missed} ${missed === 1 ? 'Short' : 'Shorts'} couldn’t be made`,
@@ -1275,8 +1474,9 @@ async function runShorts(media, options, key, minutes, run = uuid()) {
     }
     await refreshUsage();
   } catch (error) {
-    if (task.controller.signal.aborted) return endTask(task);
+    if (task.controller.signal.aborted) return;
     endTask(task);
+    if (state.screen === 'games') leaveGames();
     reportGenerationError(error, () => retry(options.count));
   }
 }
@@ -1301,10 +1501,12 @@ function reportGenerationError(error, retry) {
 
 // MARK: Progress and dialogs
 
-function beginTask(stage) {
-  const task = { stage, progress: null, controller: new AbortController(), cancelled: false };
+/** `project` is set while Shorts are being made for it: other tabs show it on Home, and a cancel discards it when it has no Shorts. */
+function beginTask(stage, project = null) {
+  const task = { stage, progress: null, controller: new AbortController(), cancelled: false, started: Date.now(), project };
   state.task = task;
   renderTask();
+  announceTask(true);
   return task;
 }
 function setTask(stage, fraction = null) {
@@ -1312,36 +1514,133 @@ function setTask(stage, fraction = null) {
   state.task.stage = stage;
   if (fraction !== null) state.task.progress = Math.max(state.task.progress ?? 0, fraction);
   renderTask();
+  announceTask();
 }
 function endTask(task) {
   if (state.task === task) state.task = null;
+  if (task?.project) taskChannel?.postMessage({ type: 'done', projectId: task.project.id });
   renderTask();
 }
-function cancelTask() {
-  if (!state.task) return;
-  state.task.cancelled = true;
-  state.task.controller.abort();
-  state.task.stage = 'Cancelling…';
-  renderTask();
-  setTimeout(() => { if (state.task?.cancelled) endTask(state.task); }, 0);
+/** Stops the running task. A project still without Shorts is deleted and Home opens, so a cancelled video leaves nothing behind. */
+async function cancelTask({ goHome = true } = {}) {
+  const task = state.task;
+  if (!task) return;
+  task.cancelled = true;
+  task.controller.abort();
+  endTask(task);
+  const project = task.project;
+  if (!project || project.segments.length > 0) { if (state.screen === 'games') leaveGames(); return; }
+  closeGames();
+  await store.deleteProject(project);
+  for (const media of project.media) state.sources.delete(media.id);
+  requestSync(0);
+  if (goHome) showHome();
 }
+
+// "Play while you wait": loaded when a run starts, so its code never delays the page or the AI step.
+// The games fill the screen at /app/games; the progress card stays in the bottom-right corner.
+let games = null;
+async function showGames() {
+  const { mountGames } = await import('./games/panel.js').catch(() => ({}));
+  // The run may have finished or been cancelled while the panel loaded.
+  if (!mountGames || !state.task?.project) return;
+  closeGames();
+  setScreen('games');
+  setUrl('/app/games');
+  $('#app').innerHTML = '<section class="games-screen"></section>';
+  games = mountGames($('.games-screen'), {
+    db, signedIn: () => Boolean(state.session),
+    onView: () => { closeGames(); renderEditor(); selectShort(state.selectedId); },
+    onHide: leaveGames,
+  });
+  renderTask();
+}
+function closeGames() { games?.close(); games = null; }
+/** Back to the screen the run belongs to, without stopping it: the project when it has Shorts, else the Create screen. */
+function leaveGames() {
+  closeGames();
+  if (state.project?.segments.length) { renderEditor(); if (state.selectedId) selectShort(state.selectedId); }
+  else if (state.create?.project) { setScreen('create'); renderCreate(); }
+  else showHome();
+  renderTask();
+}
+
+/** Seconds left, from how far the task got in the time it has run. Null until there is enough to go on. */
+function secondsLeft(task) {
+  const done = task.progress ?? 0;
+  if (!(done >= 0.03 && done < 1)) return null;
+  return ((Date.now() - task.started) / 1000) * (1 - done) / done;
+}
+const leftText = (seconds) => seconds == null ? '' : seconds < 60 ? 'less than a minute left' : `about ${Math.round(seconds / 60)} min left`;
+
+/** Asked before anything that would leave the screen while a task runs. Resolves true once the task is stopped. */
+function confirmStop() {
+  if (!state.task) return Promise.resolve(true);
+  if (state.dialog) closeDialog();
+  return new Promise((resolve) => {
+    openDialog(`<div class="stack"><h2>Stop the process?</h2>
+      <p>Relio is still working. If you leave now, it stops and ${state.task.project?.segments.length === 0 ? 'this video is removed from your projects' : 'the unfinished work is lost'}.</p>
+      <div class="row end"><button class="button ghost" id="stop-keep">Keep working</button><button class="button primary" id="stop-leave">Stop and leave</button></div></div>`);
+    dialogAnswer = () => resolve(false);
+    const answer = async (stop) => { dialogAnswer = null; closeDialog(); if (stop) await cancelTask({ goHome: false }); resolve(stop); };
+    $('#stop-keep').addEventListener('click', () => answer(false));
+    $('#stop-leave').addEventListener('click', () => answer(true));
+  });
+}
+
+// Shorts being made in one tab show on Home in the others, with how long is left.
+const taskChannel = 'BroadcastChannel' in window ? new BroadcastChannel('relio-tasks') : null;
+const remoteTasks = new Map(); // project id -> { stage, progress, left, at }
+let lastAnnounced = 0;
+function announceTask(now = false) {
+  const task = state.task;
+  if (!taskChannel || !task?.project || (!now && Date.now() - lastAnnounced < 1000)) return;
+  lastAnnounced = Date.now();
+  taskChannel.postMessage({ type: 'progress', projectId: task.project.id, progress: task.progress ?? 0, left: secondsLeft(task) });
+}
+// A quiet tab still says it's alive, so a closed or crashed one drops off Home.
+setInterval(() => announceTask(true), 5000);
+const remoteTask = (id) => { const t = remoteTasks.get(id); return t && Date.now() - t.at < 15_000 ? t : null; };
+const remoteText = (t) => `Making Shorts · ${Math.round(t.progress * 100)}%${t.left != null ? ` · ${leftText(t.left)}` : ''}`;
+taskChannel?.addEventListener('message', ({ data }) => {
+  if (data.type === 'ask') return announceTask(true);
+  if (data.type === 'progress') {
+    const known = remoteTasks.has(data.projectId);
+    remoteTasks.set(data.projectId, { ...data, at: Date.now() });
+    if (state.screen !== 'home') return;
+    const status = document.querySelector(`[data-project="${CSS.escape(data.projectId)}"] .making`);
+    if (status) status.lastChild.textContent = remoteText(remoteTasks.get(data.projectId));
+    else if (!known) showHome(state.homeView); // a project this Home hasn't listed yet
+  } else if (data.type === 'done') {
+    remoteTasks.delete(data.projectId);
+    if (state.screen === 'home') showHome(state.homeView);
+  }
+});
+taskChannel?.postMessage({ type: 'ask' });
 
 function renderTask() {
   const host = $('#progress');
   if (!host) return;
   const task = state.task;
   host.hidden = !task;
+  // The games panel sits just above the progress card.
+  document.documentElement.style.setProperty('--progress-h', task ? `${host.offsetHeight + 12}px` : '0px');
   if (!task) return;
   // Export updates this every frame; rebuilding the card each time would swallow clicks on Cancel.
   if (!host.querySelector('.progress-card')) {
     host.innerHTML = `<div class="card progress-card" role="status">
       <strong></strong>
       <div class="bar"><div></div></div>
-      <button class="button ghost" data-action="cancel">Cancel</button>
+      <span class="muted small eta"></span>
+      <div class="row progress-actions"><button class="button primary" data-action="games" hidden>Play while you wait</button>
+      <button class="button ghost" data-action="cancel">Cancel</button></div>
     </div>`;
   }
   host.querySelector('strong').textContent = task.stage;
   host.querySelector('.bar > div').style.width = `${Math.round((task.progress ?? 0) * 100)}%`;
+  host.querySelector('.eta').textContent = leftText(secondsLeft(task));
+  host.querySelector('[data-action="games"]').hidden = !task.project || state.screen === 'games';
+  document.documentElement.style.setProperty('--progress-h', `${host.offsetHeight + 12}px`);
 }
 
 function openDialog(html) {
@@ -1423,12 +1722,14 @@ function renderBin() {
   bin.innerHTML = `
     <div class="shorts-head">
       <h3>Shorts <span class="count">${project.segments.length}</span></h3><span class="spacer"></span>
-      <button class="star" data-action="sort" aria-pressed="${byScore}" title="${byScore ? 'Best score first. Click for the order of the video' : 'In the order of the video. Click for best score first'}" aria-label="Sort by score">
+      ${cards ? `<button class="star" data-action="sort" aria-pressed="${byScore}" title="${byScore ? 'Best score first. Click for the order of the video' : 'In the order of the video. Click for best score first'}" aria-label="Sort by score">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.7 5.7 6.3.8-4.6 4.3 1.2 6.2L12 17l-5.6 3 1.2-6.2L3 9.5l6.3-.8Z"/></svg></button>
-      ${media ? `<button class="create-more" data-action="make" data-id="${media.id}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2 5.5L19.5 10 14 12l-2 5.5L10 12l-5.5-2L10 8.5ZM19 16v4m-2-2h4"/></svg>Create more</button>` : ''}
+      ${media ? `<button class="create-more" data-action="make" data-id="${media.id}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2 5.5L19.5 10 14 12l-2 5.5L10 12l-5.5-2L10 8.5ZM19 16v4m-2-2h4"/></svg>Create more</button>` : ''}` : ''}
     </div>
-    <p class="source-line">${project.segments.length} ${project.segments.length === 1 ? 'Short' : 'Shorts'} from ${project.media.length === 1 ? esc(media.name) : `${project.media.length} videos`}</p>
-    ${cards ? `<div class="short-grid">${cards}</div>` : '<p class="muted small">No Shorts yet. Use Create more to make some.</p>'}`;
+    ${cards ? `<p class="source-line">${project.segments.length} ${project.segments.length === 1 ? 'Short' : 'Shorts'} from ${project.media.length === 1 ? esc(media.name) : `${project.media.length} videos`}</p>
+      <div class="short-grid">${cards}</div>` : `<div class="empty-shorts"><strong>No Shorts in this project</strong>
+      <span class="muted small">Making them was stopped or didn’t finish. Make Shorts from this video, or delete the project.</span>
+      <div class="row">${media ? `<button class="button primary" data-action="make" data-id="${media.id}">Make Shorts</button>` : ''}<button class="button ghost" data-action="delete-project">Delete project</button></div></div>`}`;
   fillThumbs();
 }
 
@@ -1523,11 +1824,18 @@ function setStage(html) {
 }
 
 async function retrack(segment, source) {
-  const configuration = { accessToken, usage: await usageFor(state.project.media.find((m) => m.id === segment.mediaId), source) };
-  if (segment.fitToFrame) segment.cropKeyframes = [{ time: 0, position: 0.5, preserveWholeFrame: true }, { time: segment.duration, position: 0.5, preserveWholeFrame: true }];
-  else segment.cropKeyframes = await Framing.analyze(source, segment.start, segment.duration, segment.cropZoom ?? 1.08, configuration, segment.captions ?? []);
+  const project = state.project;
+  if (!project?.segments.includes(segment)) return;
+  const { start, duration, fitToFrame, cropZoom } = segment;
+  const configuration = { accessToken: accountToken(), usage: await usageFor(project.media.find((m) => m.id === segment.mediaId), source) };
+  if (state.project !== project) return;
+  const keyframes = fitToFrame
+    ? [{ time: 0, position: 0.5, preserveWholeFrame: true }, { time: duration, position: 0.5, preserveWholeFrame: true }]
+    : await Framing.analyze(source, start, duration, cropZoom ?? 1.08, configuration, segment.captions ?? []);
+  if (state.project !== project || !project.segments.includes(segment) || segment.start !== start || segment.duration !== duration || segment.fitToFrame !== fitToFrame || segment.cropZoom !== cropZoom) return;
+  segment.cropKeyframes = keyframes;
   segment.cropTrackingVersion = Framing.VERSION;
-  await persist();
+  await store.saveProject(project, { isCurrent: () => state.project === project && project.segments.includes(segment) });
 }
 
 function renderInspector() {
@@ -1656,12 +1964,15 @@ function wireTimeline(segment) {
 
 /** Applies an edit to the selected Short: keeps an undo copy, saves, and re-renders the preview when the picture changed. */
 async function edit(change, { rerender = true } = {}) {
+  const project = state.project;
   const segment = selected();
   if (!segment) return;
   state.undo.push({ id: segment.id, before: JSON.stringify(segment) });
   if (state.undo.length > 50) state.undo.shift();
   await change(segment);
-  await persist();
+  if (state.project !== project || !project.segments.includes(segment)) return;
+  await store.saveProject(project, { isCurrent: () => state.project === project && project.segments.includes(segment) });
+  if (state.project !== project) return;
   if (rerender) selectShort(segment.id);
   else renderEditor();
 }
@@ -1694,7 +2005,9 @@ async function undo() {
 // MARK: Export
 
 function openExportDialog(onlyId = null) {
-  const list = state.project.segments.map((s, i) => `
+  if (state.task || !state.project) return;
+  const project = state.project;
+  const list = project.segments.map((s, i) => `
     <label class="check"><input type="checkbox" name="pick" value="${s.id}" ${!onlyId || s.id === onlyId ? 'checked' : ''}>
       ${esc(s.suggestedTitle || `Short ${i + 1}`)} <span class="muted small">${clock(s.duration)}</span></label>`).join('');
   // shortcut: Safari reports HEVC encoding as hardware but runs it at ~4 frames/s (2.5 min per 20 s Short), so it isn't offered there; drop when Safari's HEVC gets fast.
@@ -1712,39 +2025,60 @@ function openExportDialog(onlyId = null) {
         <button class="button primary">Export</button>
       </div>
     </form>`);
+  let submitting = false;
   $('#export-form').addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (submitting || state.task || state.project !== project) return;
     const form = event.currentTarget;
     const ids = [...form.querySelectorAll('input[name=pick]:checked')].map((i) => i.value);
     if (ids.length === 0) { $('#export-status').textContent = 'Choose at least one Short.'; return; }
-    // Where the browser allows it, files go into a folder the person picks; otherwise they download one by one.
-    let folder = null;
-    if ('showDirectoryPicker' in window) {
-      try { folder = await window.showDirectoryPicker({ id: 'prism-export', mode: 'readwrite', startIn: 'downloads' }); }
-      catch (error) { if (error.name === 'AbortError') return; }
+    submitting = true;
+    const submit = form.querySelector('button[type=submit], button:not([type])');
+    submit.disabled = true;
+    try {
+      // Where the browser allows it, files go into a folder the person picks; otherwise they download one by one.
+      let folder = null;
+      if ('showDirectoryPicker' in window) {
+        try { folder = await window.showDirectoryPicker({ id: 'prism-export', mode: 'readwrite', startIn: 'downloads' }); }
+        catch (error) { if (error.name === 'AbortError') return; }
+      }
+      const quality = form.elements.quality.value;
+      if (state.task || state.project !== project || !form.isConnected) return;
+      closeDialog();
+      await exportShorts(ids, quality, folder);
+    } finally {
+      submitting = false;
+      submit.disabled = false;
     }
-    const quality = form.elements.quality.value;
-    closeDialog();
-    exportShorts(ids, quality, folder);
   });
 }
 
 const STALL_MS = 45_000;
 
 async function exportShorts(ids, quality, folder = null) {
+  if (state.task || !state.project || ids.length === 0) return;
   // The project is held from the start: the person may go Home while it exports, which clears the open project.
   const project = state.project;
+  // Editing remains available during export; every file must use the settings chosen at submission.
+  const segments = structuredClone(project.segments);
+  const title = project.title;
+  const account = userId();
   const task = beginTask('Exporting…');
   const settings = exportSettings(quality);
   const seconds = [];
-  let made = 0;
+  let made = 0, failure = null, bookkeepingFailure = null;
+  const signal = task.controller.signal;
+  const progress = (stage, fraction) => { if (state.task === task) setTask(stage, fraction); };
   try {
     for (const [index, id] of ids.entries()) {
-      const segment = project.segments.find((s) => s.id === id);
+      signal.throwIfAborted();
+      const segment = segments.find((s) => s.id === id);
+      if (!segment) throw new Error('A selected Short no longer exists. Reopen Export and try again.');
       const media = project.media.find((m) => m.id === segment.mediaId);
       const source = await sourceFor(media);
-      const label = segment.suggestedTitle?.trim() || `${project.title} Short ${project.segments.indexOf(segment) + 1}`;
-      setTask(`Exporting ${index + 1} of ${ids.length} · ${label}`, index / ids.length);
+      signal.throwIfAborted();
+      const label = segment.suggestedTitle?.trim() || `${title} Short ${segments.indexOf(segment) + 1}`;
+      progress(`Exporting ${index + 1} of ${ids.length} · ${label}`, index / ids.length);
       // A browser whose encoder or decoder stops answering would leave the export waiting forever; name the step instead.
       let lastStep = 'opening the video', lastActive = Date.now(), watchdog;
       const active = () => { lastActive = Date.now(); };
@@ -1759,33 +2093,43 @@ async function exportShorts(ids, quality, folder = null) {
         ...settings, quality, signal: task.controller.signal,
         metadata: { title: segment.suggestedTitle?.trim() ?? '', description: segment.suggestedDescription?.trim() ?? '' },
         step: (name) => { lastStep = name; active(); },
-        progress: (fraction) => { lastStep = 'rendering the video'; active(); setTask(`Exporting ${index + 1} of ${ids.length} · ${label}`, (index + fraction) / ids.length); },
+        progress: (fraction) => { lastStep = 'rendering the video'; active(); progress(`Exporting ${index + 1} of ${ids.length} · ${label}`, (index + fraction) / ids.length); },
       })]).finally(() => clearInterval(watchdog));
+      signal.throwIfAborted();
       const base = await uniqueName(folder, safeName(label));
-      await saveFile(folder, blob, `${base}.mp4`);
-      track('clip_exported', { quality });
+      signal.throwIfAborted();
+      await saveFile(folder, blob, `${base}.mp4`, signal);
       seconds.push(segment.duration);
       made++;
+      track('clip_exported', { quality });
     }
   } catch (error) {
-    endTask(task);
-    if (task.cancelled) return;
-    return showError('Couldn’t export', error.message);
+    failure = error;
+  } finally {
+    if (made > 0) {
+      try {
+        const exported = await store.addExportCount(project.id, made);
+        if (state.project?.id === project.id && exported !== null) state.project.exported = exported;
+      } catch (error) { bookkeepingFailure = error; }
+      // Stats only: it must not hold the progress card open after the files are already saved.
+      if (userId() === account) recordExport(made, seconds.reduce((a, b) => a + b, 0), quality);
+    }
   }
+  // A cancelled task may have given way to another project or task while its file write settled.
+  const showResult = state.task === task || (task.cancelled && !state.task && state.project?.id === project.id);
   endTask(task);
+  if (!showResult) return;
+  const partial = made > 0 ? `${made} of ${ids.length} Shorts saved before the export ${task.cancelled ? 'was cancelled' : 'stopped'}.` : '';
+  const bookkeepingNote = bookkeepingFailure ? ' The files were saved, but the project’s export count and expiry timer could not be updated.' : '';
+  if (failure || task.cancelled) {
+    if (task.cancelled && made === 0) return;
+    return showError(task.cancelled ? 'Export cancelled' : 'Couldn’t finish export',
+      `${partial}${task.cancelled ? '' : ` ${failure?.message ?? ''}`}${bookkeepingNote}`.trim());
+  }
+  if (bookkeepingFailure) return showError('Files exported', `${made} Shorts saved.${bookkeepingNote}`);
   openDialog(`<div class="stack"><h2>Exported</h2>
     <p>${made} ${made === 1 ? 'Short' : 'Shorts'} ${folder ? `saved to the folder “${esc(folder.name)}”` : 'downloaded to your Downloads folder'}.</p>
     <div class="row end"><button class="button primary" data-action="close">OK</button></div></div>`);
-  if (made > 0) {
-    // Saved by ID, not through the open project, so an export that ends after the person went Home still restarts the 7 days.
-    const saved = await store.loadProject(project.id);
-    if (saved) {
-      saved.exported = (saved.exported ?? 0) + made;
-      await store.saveProject(saved);
-      if (state.project?.id === project.id) state.project.exported = saved.exported;
-    }
-    recordExport(made, seconds.reduce((a, b) => a + b, 0), quality);
-  }
 }
 
 /** A name that doesn't exist in the folder yet ("Title", then "Title 2"); downloads can't be checked, so the browser numbers those. */
@@ -1800,16 +2144,29 @@ async function uniqueName(folder, base) {
   }
 }
 
-async function saveFile(folder, blob, name) {
+async function saveFile(folder, blob, name, signal) {
+  signal?.throwIfAborted();
   if (!folder) { download(blob, name); await new Promise((resolve) => setTimeout(resolve, 300)); return; }
-  const writable = await (await folder.getFileHandle(name, { create: true })).createWritable();
-  await writable.write(blob);
-  await writable.close();
+  const handle = await folder.getFileHandle(name, { create: true });
+  let writable;
+  try {
+    signal?.throwIfAborted();
+    writable = await handle.createWritable();
+    signal?.throwIfAborted();
+    await writable.write(blob);
+    signal?.throwIfAborted();
+    await writable.close();
+  } catch (error) {
+    if (writable) await writable.abort().catch(() => {});
+    // abort() discards the write, but the file create:true made stays behind empty; a cancelled export should leave nothing.
+    if (folder.removeEntry) await folder.removeEntry(name).catch(() => {});
+    throw error;
+  }
 }
 
 async function recordExport(count, seconds, quality) {
   try {
-    await db().from('exports').insert({ short_count: count, seconds, quality });
+    await db().from('exports').insert({ user_id: userId(), short_count: count, seconds, quality });
   } catch { /* stats only; the export itself succeeded */ }
 }
 
@@ -1826,8 +2183,11 @@ const safeName = (value) => value.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g,
 
 // MARK: Events
 
+// Actions that leave the current screen; while a task runs they ask to stop it first.
+const LEAVES = new Set(['home', 'open', 'open-folder', 'create', 'make', 'nav', 'signout', 'tutorial']);
 document.addEventListener('click', async (event) => {
   const choice = event.target.closest('[data-create],[data-style],[data-type]');
+  if (choice && state.create && state.task && !(await confirmStop())) return;
   if (choice && state.create) {
     if (choice.dataset.create) await createAction(choice.dataset.create);
     else { if (choice.dataset.style) state.create.style = choice.dataset.style; else state.create.videoType = choice.dataset.type; renderCreate(); }
@@ -1836,8 +2196,15 @@ document.addEventListener('click', async (event) => {
   const target = event.target.closest('[data-action]');
   if (!target) return;
   const action = target.dataset.action;
+  if (state.task && LEAVES.has(action) && !(await confirmStop())) return;
+  if (action === 'open' && remoteTask(target.dataset.id)) {
+    return showError('Shorts are still being made', 'This video is being made in another tab. Open it when it’s done.');
+  }
   if (action === 'close') closeDialog();
   else if (action === 'cancel') cancelTask();
+  else if (action === 'delete-project') deleteProjectNow(state.project.id);
+  else if (action === 'games') showGames();
+  else if (action === 'tutorial') showTutorial();
   else if (action === 'home') showHome();
   else if (action === 'open') openProject(target.dataset.id);
   else if (action === 'retry-download' && lastDownload) fetchFromCloud(lastDownload.project, lastDownload.media, lastDownload.shortPart);
@@ -1856,14 +2223,13 @@ document.addEventListener('click', async (event) => {
     else if (screen === 'settings') showSettings();
   }
   else if (action === 'settings-tab') showSettings(target.dataset.tab);
-  else if (action === 'signout') { await db().auth.signOut(); state.session = null; renderGate(); }
+  else if (action === 'signout') { const { error } = await db().auth.signOut(); if (error) showError('Couldn’t sign out', error.message); }
   else if (action === 'delete-account') deleteAccount();
   else if (action === 'theme') switchTheme(target.dataset.theme);
   else if (action === 'export-dialog') openExportDialog();
   else if (action === 'export-one') openExportDialog(state.selectedId);
   else if (action === 'sync-now') sync();
   else if (action === 'retry-upload') { videoBlock = null; uploadPending(); showSettings('usage'); }
-  else if (action === 'collapse') applyCollapsed(!$('.shell').classList.contains('collapsed'));
   else if (action === 'usage') { closeDialog(); showSettings('usage'); }
   else if (action === 'retrack') edit(async (s) => { s.cropKeyframes = null; await retrack(s, await sourceFor(state.project.media.find((m) => m.id === s.mediaId))); });
   else if (action === 'remove') removeShort(target.dataset.id ?? state.selectedId);
@@ -1904,7 +2270,7 @@ document.addEventListener('change', async (event) => {
     if (field === 'splitScreen' && input.checked && !s.splitCenters) {
       const source = await sourceFor(state.project.media.find((m) => m.id === s.mediaId));
       const media = state.project.media.find((m) => m.id === s.mediaId);
-      s.splitCenters = await Framing.findSplitCenters(source, s.start, s.duration, { accessToken, usage: await usageFor(media, source) }).catch(() => null) ?? undefined;
+      s.splitCenters = await Framing.findSplitCenters(source, s.start, s.duration, { accessToken: accountToken(), usage: await usageFor(media, source) }).catch(() => null) ?? undefined;
     }
   });
 });
@@ -1917,25 +2283,34 @@ document.addEventListener('input', (event) => {
 });
 
 async function regenerateCaptions() {
+  if (state.task) return;
   const segment = selected();
   if (!segment) return;
-  const media = state.project.media.find((m) => m.id === segment.mediaId);
+  const project = state.project;
+  const media = project.media.find((m) => m.id === segment.mediaId);
+  const start = segment.start, duration = segment.duration;
   const task = beginTask('Relio AI · regenerating subtitles…');
   try {
     const source = await sourceFor(media);
     // The saved sentence transcript is in source seconds, as the engine expects.
-    const saved = state.project.transcripts?.[media.id]?.cues ?? null;
-    const { cues, words, notice } = await Selection.regenerateCaptions(source, { start: segment.start, end: segment.start + segment.duration },
-      { accessToken, usage: await usageFor(media, source) }, task.controller.signal, saved);
-    endTask(task);
-    await edit(async (s) => {
-      s.captions = cues.map((c) => ({ ...c, start: c.start - segment.start }));
-      s.speechWords = words.map((w) => ({ ...w, start: w.start - segment.start }));
-      s.captionNotice = notice ?? undefined;
-    });
+    task.controller.signal.throwIfAborted();
+    const saved = project.transcripts?.[media.id]?.cues ?? null;
+    const { cues, words, notice } = await Selection.regenerateCaptions(source, { start, end: start + duration },
+      { accessToken: accountToken(), usage: await usageFor(media, source) }, task.controller.signal, saved);
+    task.controller.signal.throwIfAborted();
+    if (state.task !== task || state.project !== project || !project.segments.includes(segment)) return;
+    if (segment.start !== start || segment.duration !== duration) throw new Error('The Short was trimmed while captions were being made. Try regenerating captions again.');
+    state.undo.push({ id: segment.id, before: JSON.stringify(segment) });
+    if (state.undo.length > 50) state.undo.shift();
+    segment.captions = cues.map((c) => ({ ...c, start: c.start - start }));
+    segment.speechWords = words.map((w) => ({ ...w, start: w.start - start }));
+    segment.captionNotice = notice ?? undefined;
+    await store.saveProject(project, { isCurrent: () => state.project === project && state.task === task && !task.controller.signal.aborted });
+    if (!task.controller.signal.aborted && state.project === project && state.selectedId === segment.id) selectShort(segment.id);
   } catch (error) {
-    endTask(task);
     if (!task.controller.signal.aborted) reportGenerationError(error);
+  } finally {
+    endTask(task);
   }
 }
 
@@ -1949,7 +2324,8 @@ document.addEventListener('mousedown', (event) => { if (event.target.id === 'dia
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && $('#menu')) { closeMenu(); return; }
   if (event.key === 'Escape' && state.dialog) { closeDialog(); return; }
-  if (event.target.closest('input,textarea,select') || state.dialog) return;
+  // Keys in the games panel belong to the game (Space drops a block there, it doesn't play the video).
+  if (event.target.closest('input,textarea,select,.games-screen') || state.dialog) return;
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); undo(); }
   if (event.key === ' ') { const play = $('[data-play]'); if (play) { event.preventDefault(); play.click(); } }
 });

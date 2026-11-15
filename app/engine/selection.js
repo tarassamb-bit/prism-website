@@ -252,7 +252,7 @@ or an unresolved "this"/"he"/"that" a new viewer cannot place. Drop a clip whose
 Return exactly ${count} ids unless fewer than ${count} are genuinely distinct. CANDIDATES_JSON:
 ${JSON.stringify(candidates)}`;
   try {
-    const response = await generate([text(prompt)], { type: 'OBJECT', properties: { ids: { type: 'ARRAY', items: { type: 'INTEGER' } } }, required: ['ids'] }, configuration, signal);
+    const response = await generate([text(prompt)], { type: 'OBJECT', properties: { ids: { type: 'ARRAY', items: { type: 'INTEGER' } } }, required: ['ids'] }, configuration, signal, { judge: true });
     if (!Array.isArray(response.ids)) return null;
     if (response.ids.length === 0) return [];
     const seen = new Set();
@@ -323,7 +323,7 @@ ${transcript}`;
     start: { type: 'NUMBER' }, end: { type: 'NUMBER' }, score: { type: 'NUMBER' }, layout: { type: 'STRING', enum: ['track', 'fit'] },
     title: { type: 'STRING' }, reason: { type: 'STRING' }, description: { type: 'STRING' } },
   required: ['start', 'end', 'score', 'layout', 'title', 'reason', 'description'] } } }, required: ['clips'] };
-  const result = await generate(parts, schema, configuration, signal);
+  const result = await generate(parts, schema, configuration, signal, { judge: true });
   if (!Array.isArray(result?.clips)) throw new GeminiError('invalidResponse');
   const returned = result.clips.map((c) => {
     if (typeof c?.start !== 'number' || typeof c.end !== 'number' || typeof c.score !== 'number') throw new GeminiError('invalidResponse');
@@ -395,7 +395,7 @@ export async function transcribe(source, interval, configuration, { progress, gr
   const results = new Array(chunks.length).fill(null);
   let done = 0, handedBack = 0;
   progress?.(0);
-  await map(chunks, (chunk, token) => transcribeChunk(source, chunk.start, chunk.length, granularity, reference, configuration, token), signal, PARALLEL_REQUESTS, (index, words) => {
+  await map(chunks, (chunk, token) => transcribeChunk(source, chunk.start, chunk.length, granularity, reference, configuration, token), signal, PARALLEL_REQUESTS, async (index, words) => {
     results[index] = words;
     done += chunks[index].length;
     progress?.(Math.min(1, done / total));
@@ -403,7 +403,7 @@ export async function transcribe(source, interval, configuration, { progress, gr
     while (prefix < chunks.length && results[prefix] !== null) prefix++;
     if (prefix <= handedBack) return;
     handedBack = prefix;
-    finished?.(results.slice(0, prefix).flat(), chunks[prefix - 1].start + chunks[prefix - 1].length);
+    await finished?.(results.slice(0, prefix).flat(), chunks[prefix - 1].start + chunks[prefix - 1].length);
   });
   const words = results.flat();
   if (granularity !== 'words' || words.length === 0) return words;
