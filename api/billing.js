@@ -2,7 +2,39 @@
 //   POST ?action=sync&transaction_id=txn_…  save a just-finished checkout (202 until Paddle attaches the subscription)
 //   POST ?action=refresh                     re-read the user's subscriptions from Paddle
 //   POST ?action=portal                      link to the Paddle billing portal for their subscriptions
+//   POST ?action=change&price_id=pri_…       switch the active plan to another plan, charging or crediting the difference now
 const { ACTIVE, HttpError, send, fail, requireEnv, paddle, supabase, getUser, syncSubscription } = require('./_lib');
+
+// The one-time packs (Paddle sandbox and live prices): 100 extra video minutes, or 10 extra Live hours, for the month they're bought.
+const MINUTES = { table: 'minute_packs', field: 'minutes', amount: 100 }, HOURS = { table: 'live_packs', field: 'hours', amount: 10 };
+const PACKS = {
+  pri_01m7wykejd7qj2jm895kpb8cyy: MINUTES, pri_01m7z8ycnqttzw183g03j59jre: MINUTES,
+  pri_01m7x801j9rtht27jw31r9vavh: HOURS, pri_01m7z8yd2m4w7cv2nasnt49grn: HOURS,
+};
+
+// The monthly plans (Paddle sandbox and live prices, as in pricing-tiers.js): the only prices a plan can be switched to.
+// Ordered from the lowest plan to the highest: a plan can only be switched to a higher one.
+const PLAN_RANK = new Map([
+  ['pri_01m7wxv785xs9pzn319erq7wtn', 1], ['pri_01m7z8ybf53k8xtd0cghm6hrnb', 1], // Tier 1
+  ['pri_01m7wxv7jvh2e830hj69y0merw', 2], ['pri_01m7z8ybvx3b7d6k0nx0r2edb9', 2], // Creator
+  ['pri_01m7wxv7wmheyjcr6qqz3cy41b', 3], ['pri_01m7z8yc8ysxtmph5v5gv94y2c', 3], // Studio
+]);
+const PLANS = new Set(PLAN_RANK.keys());
+
+/** Saves the packs of a paid transaction to the account, once per transaction. */
+async function recordPacks(transaction, userId) {
+  if (!['paid', 'completed'].includes(transaction.status)) return;
+  for (const table of ['minute_packs', 'live_packs']) {
+    const kinds = (transaction.items ?? []).map((item) => ({ pack: PACKS[item.price?.id], quantity: item.quantity ?? 1 })).filter((x) => x.pack?.table === table);
+    if (!kinds.length) continue;
+    const field = kinds[0].pack.field, total = kinds.reduce((sum, x) => sum + x.pack.amount * x.quantity, 0);
+    const { response, text } = await supabase(`${table}?on_conflict=transaction_id`, {
+      method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' },
+      body: JSON.stringify({ transaction_id: transaction.id, user_id: userId, [field]: total }),
+    });
+    if (!response.ok) throw new HttpError(502, `Supabase returned ${response.status}: ${text}`);
+  }
+}
 
 async function userSubscriptions(userId, filter = '') {
   const { response, body } = await supabase(
@@ -25,7 +57,10 @@ module.exports = async (req, res) => {
         if (!/^txn_[a-z0-9]+$/.test(transactionId)) throw new HttpError(400, 'Invalid transaction ID.');
         const transaction = await paddle(`/transactions/${transactionId}`);
         if (transaction.custom_data?.supabase_user_id !== user.id) throw new HttpError(403, 'This purchase belongs to another account.');
-        // Paddle attaches the subscription a moment after payment; the browser asks again.
+        await recordPacks(transaction, user.id);
+        // A pack on its own is done here; for a plan, Paddle attaches the subscription a moment after payment and the browser asks again.
+        const forPlan = (transaction.items ?? []).some((item) => item.price?.billing_cycle);
+        if (!forPlan) return send(res, 200, { result: 'pack' });
         if (!transaction.subscription_id) return send(res, 202, { pending: true });
         return send(res, 200, { result: await syncSubscription(transaction.subscription_id) });
       }
@@ -48,6 +83,23 @@ module.exports = async (req, res) => {
         });
         return send(res, 200, { url: session.urls.general.overview });
       }
+      case 'change': {
+        const priceId = query.get('price_id') || '';
+        if (!PLANS.has(priceId)) throw new HttpError(400, 'That isn’t one of Relio’s plans.');
+        const [row] = await userSubscriptions(user.id, `&status=in.(${ACTIVE})`);
+        if (!row) throw new HttpError(404, 'No plan to change yet. Subscribe first.');
+        const current = await paddle(`/subscriptions/${row.id}`);
+        if (current.items?.some((item) => item.price?.id === priceId)) throw new HttpError(409, 'You’re already on this plan.');
+        // Upgrades only: a lower plan would credit the unused part to the balance, so it starts at the next renewal instead.
+        const currentRank = Math.max(0, ...(current.items ?? []).map((item) => PLAN_RANK.get(item.price?.id) ?? 0));
+        if (PLAN_RANK.get(priceId) <= currentRank) throw new HttpError(409, 'You can only switch to a higher plan. To go lower, cancel and subscribe to the lower plan when your current one ends.');
+        // Paddle bills the prorated difference for the rest of this month at once; the renewal date stays.
+        await paddle(`/subscriptions/${row.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ items: [{ price_id: priceId, quantity: 1 }], proration_billing_mode: 'prorated_immediately' }),
+        });
+        return send(res, 200, { result: await syncSubscription(row.id) });
+      }
       default:
         throw new HttpError(400, 'Unknown action.');
     }
@@ -55,3 +107,5 @@ module.exports = async (req, res) => {
     fail(res, error);
   }
 };
+module.exports.recordPacks = recordPacks;
+module.exports.PLANS = PLANS;
